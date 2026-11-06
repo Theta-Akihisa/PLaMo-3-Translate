@@ -38,6 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.servicesProvider = servicesProvider
         NSUpdateDynamicServices()
         LocalAPIController.shared.applyStoredSettings()
+        // ⌘C×2 翻訳（権限が無ければ初回のみシステムの許可ダイアログを出す）
+        if DoubleCopyMonitor.shared.isEnabled, !UserDefaults.standard.bool(forKey: "askedAccessibility") {
+            UserDefaults.standard.set(true, forKey: "askedAccessibility")
+            DoubleCopyMonitor.shared.refreshTrust(prompt: true)
+        }
+        DoubleCopyMonitor.shared.startSupervising()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

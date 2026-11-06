@@ -23,7 +23,7 @@ final class ResultPanelController {
     static let shared = ResultPanelController()
     private var panel: NSPanel?
 
-    func show(source: String) {
+    func show(source: String, nearMouse: Bool = false) {
         panel?.close()
         let host = NSHostingController(rootView: ServiceResultView(source: source).environmentObject(AppModel.shared))
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 320),
@@ -33,7 +33,19 @@ final class ResultPanelController {
         p.title = "PLaMoで翻訳"
         p.level = .floating
         p.isReleasedWhenClosed = false
-        p.center()
+        p.hidesOnDeactivate = false
+        if nearMouse {
+            let m = NSEvent.mouseLocation
+            var origin = NSPoint(x: m.x + 12, y: m.y - 332)
+            if let screen = NSScreen.screens.first(where: { NSMouseInRect(m, $0.frame, false) }) ?? NSScreen.main {
+                let f = screen.visibleFrame
+                origin.x = min(max(origin.x, f.minX), f.maxX - 460)
+                origin.y = min(max(origin.y, f.minY), f.maxY - 320)
+            }
+            p.setFrameOrigin(origin)
+        } else {
+            p.center()
+        }
         p.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         panel = p
@@ -66,6 +78,11 @@ struct ServiceResultView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack {
+                Button("メインウィンドウで開く") {
+                    model.translate(externalText: source)
+                    NSApp.activate(ignoringOtherApps: true)
+                    NSApp.windows.first { !($0 is NSPanel) && $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
+                }
                 Spacer()
                 Button("コピー") { Clipboard.copy(output) }.disabled(output.isEmpty)
             }

@@ -8,8 +8,8 @@ import PlamoTranslateKit
 // このファイルだけが PlamoTranslateKit / Core の具体 API に触れる。
 // Kit 側の名前が違っていたらここだけ直せばよい。
 // 【仮定している Kit API（要確認）】
-//  - ModelStore() / Translator() は引数なしで生成できる
-//  - ModelStore.progress は [String: Double]（キー = ModelFile.file, 0...1）
+//  - Translator(store:) に ModelStore を共有させる（別インスタンスだとインストール状態がずれる）
+//  - ModelStore.downloads: [ModelFile.file: DownloadStatus]
 //  - Translator.engine: LlamaEngine?（ロード済みなら非 nil）
 //  - Translator.unload()（エンジン解放）
 //  - DocumentProgress.text（累積した翻訳全文）
@@ -44,10 +44,11 @@ final class AppModel: ObservableObject {
         static let settings = "translationSettings.v1"
         static let history = "translationHistory.v1"
         static let quantChoices = "quantChoices.v1"
+        static let live = "liveTranslate.v1"
     }
 
-    let modelStore = ModelStore()
-    let translator = Translator()
+    let modelStore: ModelStore
+    let translator: Translator
 
     // 設定（変更時に自動保存）
     @Published var settings: TranslationSettings {
@@ -55,7 +56,9 @@ final class AppModel: ObservableObject {
     }
 
     // 翻訳画面の状態
-    @Published var sourceText = ""
+    @Published var sourceText = "" {
+        didSet { sourceChanged(old: oldValue) }
+    }
     @Published var outputText = ""
     @Published var isTranslating = false
     @Published var errorMessage: String?
@@ -69,12 +72,27 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var history: [HistoryEntry]
 
+    /// 入力しながら自動翻訳（DeepL 風）。デバウンス後に翻訳する
+    @Published var liveTranslate: Bool {
+        didSet { UserDefaults.standard.set(liveTranslate, forKey: Keys.live) }
+    }
+    static let liveDebounceNanos: UInt64 = 500_000_000
+    /// 「言語を検出」選択時の検出結果（確信度が高く、対応言語のときだけ非 nil）
+    @Published private(set) var detectedLang: String?
+    private var debounceTask: Task<Void, Never>?
+    private var suppressLive = false
+    private var immediateNext = false
+    private var runID = 0
+
     private var sinks = Set<AnyCancellable>()
     private var translateTask: Task<Void, Never>?
     private var loadTask: Task<Void, Error>?
     private var loadedKey: String?
 
     init() {
+        let store = ModelStore()
+        self.modelStore = store
+        self.translator = Translator(store: store)
         let d = UserDefaults.standard
         var s: TranslationSettings = d.data(forKey: Keys.settings)
             .flatMap { try? JSONDecoder().decode(TranslationSettings.self, from: $0) } ?? TranslationSettings()
@@ -84,6 +102,7 @@ final class AppModel: ObservableObject {
         }
         self.settings = s
         self.quantChoices = (d.dictionary(forKey: Keys.quantChoices) as? [String: String]) ?? [:]
+        self.liveTranslate = (d.object(forKey: Keys.live) as? Bool) ?? true
         self.history = d.data(forKey: Keys.history)
             .flatMap { try? JSONDecoder().decode([HistoryEntry].self, from: $0) } ?? []
 
@@ -138,7 +157,13 @@ final class AppModel: ObservableObject {
 
     func isInstalled(_ file: ModelFile) -> Bool { modelStore.isInstalled(file) }
 
-    func progress(for file: ModelFile) -> Double? { modelStore.progress[file.file] }
+    func progress(for file: ModelFile) -> Double? {
+        switch modelStore.downloads[file.file] {
+        case .downloading(let p): return p
+        case .verifying: return 1.0
+        case .failed, .none: return nil
+        }
+    }
 
     var statusText: String {
         switch translator.state {
@@ -195,7 +220,7 @@ final class AppModel: ObservableObject {
     func importGGUF(url: URL) async {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        do { try await modelStore.importLocalFile(url: url) } catch { errorMessage = error.localizedDescription }
+        do { _ = try await modelStore.importLocalFile(url: url) } catch { errorMessage = error.localizedDescription }
     }
     #endif
 
@@ -247,10 +272,14 @@ final class AppModel: ObservableObject {
                             useHistory: Bool = false,
                             onPartial: @escaping (String) -> Void = { _ in }) async throws -> String {
         var s = settings
+        let autoDetected = s.sourceLang == nil
+        if autoDetected { s.sourceLang = LanguageDetector.detect(text) }
         if let t = targetLang {
             s.targetLang = t
-            if t != "ja" { s.form = nil }
+        } else if autoDetected, let src = s.sourceLang, src == (s.targetLang == "ja(easy)" ? "ja" : s.targetLang) {
+            s.targetLang = (src == "ja") ? "en" : "ja"   // DeepL 風: 同一言語なら ja⇄en
         }
+        if s.targetLang != "ja" { s.form = nil }
         try await ensureLoaded()
         var acc = ""
         if text.count > Self.longTextThreshold {
@@ -276,9 +305,80 @@ final class AppModel: ObservableObject {
         return acc.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: ライブ翻訳
+
+    private func sourceChanged(old: String) {
+        guard !suppressLive, sourceText != old else { return }
+        debounceTask?.cancel()
+        stopTranslation()   // 編集されたら進行中の生成を中断
+        if sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            outputText = ""
+            errorMessage = nil
+            detectedLang = nil
+            return
+        }
+        updateDetection()
+        guard liveTranslate else { return }
+        scheduleTranslation(immediate: immediateNext || sourceText.count - old.count >= 12)
+        immediateNext = false
+    }
+
+    /// 検出言語の更新と、DeepL 風のスマート既定ターゲット（ja⇄en）
+    private func updateDetection() {
+        guard settings.sourceLang == nil else { detectedLang = nil; return }
+        let d = LanguageDetector.detect(sourceText)
+        detectedLang = d
+        guard let d else { return }
+        let target = settings.targetLang == "ja(easy)" ? "ja" : settings.targetLang
+        if d == target {
+            settings.targetLang = (d == "ja") ? "en" : "ja"
+            settings.form = nil
+        }
+    }
+
+    /// 検出結果の表示名（例: 「英語（検出）」）
+    var autoDetectLabel: String {
+        if let d = detectedLang { return "\(LanguageCatalog.name(for: d))（検出）" }
+        return "言語を検出"
+    }
+
+    private func scheduleTranslation(immediate: Bool) {
+        debounceTask?.cancel()
+        debounceTask = Task { [weak self] in
+            if !immediate { try? await Task.sleep(nanoseconds: Self.liveDebounceNanos) }
+            guard !Task.isCancelled, let self else { return }
+            self.startTranslation()
+        }
+    }
+
+    /// 言語・文体を変えたときの再翻訳
+    func retranslateIfLive() {
+        guard liveTranslate, !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        scheduleTranslation(immediate: true)
+    }
+
+    /// クリップボードの内容を原文にして即翻訳（ペースト時は待たない）
+    func pasteFromClipboard() {
+        guard let s = Clipboard.paste(), !s.isEmpty else { return }
+        immediateNext = true
+        if s == sourceText { startTranslation() } else { sourceText = s }
+        immediateNext = false
+    }
+
+    /// 外部（URL スキーム・ダブルコピー等）から原文を渡して翻訳する
+    func translate(externalText: String) {
+        immediateNext = true
+        sourceText = externalText
+        immediateNext = false
+        if !liveTranslate { startTranslation() }
+    }
+
     func startTranslation() {
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isTranslating else { return }
+        guard !text.isEmpty else { return }
+        translateTask?.cancel()
+        runID += 1
+        let id = runID
         isTranslating = true
         errorMessage = nil
         outputText = ""
@@ -288,32 +388,56 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             do {
                 let result = try await self.performTranslation(text: text, useHistory: true) { [weak self] partial in
-                    self?.outputText = partial
+                    if let self, self.runID == id { self.outputText = partial }
                 }
-                self.outputText = result
-                self.addHistory(source: text, translation: result, sourceLang: source, targetLang: target)
+                if self.runID == id {
+                    self.outputText = result
+                    self.addHistory(source: text, translation: result, sourceLang: source, targetLang: target)
+                }
             } catch is CancellationError {
-                // ユーザー操作による中断。部分結果は残す
+                // 中断: 部分結果は残す
             } catch {
-                if !Task.isCancelled { self.errorMessage = error.localizedDescription }
+                if self.runID == id, !Task.isCancelled { self.errorMessage = error.localizedDescription }
             }
-            self.isTranslating = false
+            if self.runID == id { self.isTranslating = false }
         }
     }
 
     func stopTranslation() {
+        runID += 1
         translateTask?.cancel()
+        isTranslating = false
+    }
+
+    /// 文字列を取り出す（ドラッグ&ドロップ / ファイル読み込み用）
+    func loadText(from url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try Data(contentsOf: url)
+            guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .shiftJIS) else {
+                errorMessage = "テキストとして読み込めませんでした。"
+                return
+            }
+            immediateNext = true
+            sourceText = text
+            immediateNext = false
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func swapLanguages() {
-        guard let src = settings.sourceLang else { return }
+        guard let src = settings.sourceLang ?? detectedLang else { return }
         let newSource = settings.targetLang == "ja(easy)" ? "ja" : settings.targetLang
         settings.sourceLang = newSource
         settings.targetLang = src
         if settings.targetLang != "ja" { settings.form = nil }
         if !outputText.isEmpty {
-            sourceText = outputText
-            outputText = ""
+            let o = outputText
+            immediateNext = true
+            sourceText = o
+            immediateNext = false
         }
     }
 
@@ -321,6 +445,7 @@ final class AppModel: ObservableObject {
 
     private func addHistory(source: String, translation: String, sourceLang: String?, targetLang: String) {
         guard !translation.isEmpty, source.count <= 20_000 else { return }
+        if let first = history.first, first.source == source, first.targetLang == targetLang { history.removeFirst() }
         history.insert(HistoryEntry(source: source, translation: translation,
                                     sourceLang: sourceLang, targetLang: targetLang), at: 0)
         if history.count > Self.historyCapacity { history.removeLast(history.count - Self.historyCapacity) }
@@ -338,7 +463,10 @@ final class AppModel: ObservableObject {
     }
 
     func restore(_ entry: HistoryEntry) {
+        suppressLive = true
         sourceText = entry.source
+        suppressLive = false
+        stopTranslation()
         outputText = entry.translation
         settings.sourceLang = entry.sourceLang
         settings.targetLang = entry.targetLang

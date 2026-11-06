@@ -9,6 +9,12 @@ struct TranslationSettingsView: View {
     var body: some View {
         Form {
             Section {
+                Toggle("入力しながら自動翻訳", isOn: $model.liveTranslate)
+            } footer: {
+                Text("入力が止まってから約0.5秒後に翻訳します。オフの場合は ⌘↩ または「翻訳」ボタンで実行します。")
+            }
+
+            Section {
                 TextField("文脈（任意）", text: $model.settings.context, axis: .vertical)
                     .lineLimit(2...6)
             } header: {
