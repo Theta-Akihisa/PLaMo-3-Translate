@@ -7,6 +7,7 @@ const CSS = `
 .sel-icon:hover { background: #eef3ff; }
 button.primary { background:#2f6fed; color:#fff; border-color:transparent; }
 button.primary:hover { background:#2459c4; }
+button:disabled { opacity:.5; cursor:default; }
 select { font: inherit; font-size: 12px; border:1px solid #cbd1d9; border-radius:7px; background:#f6f7f9; color:inherit; padding: 2px 4px; max-width: 150px; }
 
 :host { all: initial; }
@@ -163,6 +164,10 @@ export class Panel {
   }
   setStatus(t: string): void {
     this.foot.textContent = t;
+  }
+  /** 翻訳が完了するまで「置き換え」を無効にする (途中結果で置換しない) */
+  setBusy(busy: boolean): void {
+    this.replaceBtn.disabled = busy;
   }
   setText(t: string): void {
     this.body.className = 'body';

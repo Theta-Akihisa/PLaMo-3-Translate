@@ -92,6 +92,7 @@ async function translateSelection(textArg?: string): Promise<void> {
   const run = async () => {
     const my = ++seq;
     current?.cancel();
+    p.setBusy(true);
     p.setPlaceholder('言語を検出中…');
     let source = s.sourceLang;
     let tgt = target;
@@ -99,7 +100,7 @@ async function translateSelection(textArg?: string): Promise<void> {
       const det = await detectLanguage(text);
       if (my !== seq) return;
       source = det.code ?? 'auto';
-      const nt = smartTarget(det.code, tgt);
+      const nt = smartTarget(det.guess, tgt);
       if (nt !== tgt && !userPickedTarget) {
         tgt = nt;
         target = nt;
@@ -130,6 +131,7 @@ async function translateSelection(textArg?: string): Promise<void> {
       latest = r.text;
       p.setText(r.text || '(翻訳結果が空でした)');
       p.setStatus(`完了 (${(r.ms / 1000).toFixed(1)} 秒)`);
+      p.setBusy(false);
     } catch (e) {
       if (e instanceof TranslateCancelled || my !== seq) return;
       p.setError((e as Error).message);
