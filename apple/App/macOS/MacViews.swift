@@ -52,6 +52,8 @@ struct MacRootView: View {
 struct MacSettingsView: View {
     var body: some View {
         TabView {
+            ShortcutSettingsView()
+                .tabItem { Label("ショートカット", systemImage: "keyboard") }
             TranslationSettingsView()
                 .tabItem { Label("翻訳", systemImage: "textformat") }
             LocalAPISettingsView()
@@ -100,5 +102,32 @@ struct LocalAPISettingsView: View {
         } else {
             portText = String(port)
         }
+    }
+}
+
+/// ⌘C を2回押して翻訳（DeepL 風）の設定と Accessibility 権限
+struct ShortcutSettingsView: View {
+    @ObservedObject private var monitor = DoubleCopyMonitor.shared
+    @AppStorage(DoubleCopySettings.enabledKey) private var enabled = true
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("⌘C を2回押して選択テキストを翻訳", isOn: $enabled)
+                    .onChange(of: enabled) { _, _ in monitor.apply() }
+                LabeledContent("アクセシビリティ権限", value: monitor.isTrusted ? "許可済み" : "未許可")
+                if !monitor.isTrusted {
+                    Button("権限をリクエスト…") { monitor.refreshTrust(prompt: true) }
+                    Button("システム設定を開く") { monitor.openSystemSettings() }
+                }
+                LabeledContent("状態", value: monitor.isRunning ? "有効" : "停止中")
+            } header: {
+                Text("グローバルショートカット")
+            } footer: {
+                Text("他のアプリで ⌘C を素早く2回押すと、コピーしたテキストを小さな翻訳ウィンドウで翻訳します。他のアプリのキー入力を検知するため、システム設定 > プライバシーとセキュリティ > アクセシビリティ でこのアプリを許可してください（許可後、数秒で有効になります）。キー入力の内容は保存・送信しません。")
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { monitor.apply() }
     }
 }

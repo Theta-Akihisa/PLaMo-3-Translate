@@ -57,6 +57,10 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
+        CFBundleURLTypes:
+          - CFBundleURLName: jp.example.plamotranslate
+            CFBundleURLSchemes:
+              - plamotranslate
     entitlements:
       path: Config/iOS.entitlements
       properties:
@@ -94,13 +98,12 @@ targets:
             NSPortName: PlamoTranslate
             NSSendTypes:
               - NSStringPboardType
+    # App Sandbox は使わない（グローバルな ⌘C×2 監視に Accessibility 権限が必要なため）。
+    # Hardened Runtime は有効。Mac App Store ではなく Developer ID 配布向け。
     entitlements:
       path: Config/macOS.entitlements
       properties:
-        com.apple.security.app-sandbox: true
-        com.apple.security.network.client: true
-        com.apple.security.network.server: true
-        com.apple.security.files.user-selected.read-only: true
+        com.apple.security.app-sandbox: false
 
   PlamoTranslate-macOSTests:
     type: bundle.unit-test
