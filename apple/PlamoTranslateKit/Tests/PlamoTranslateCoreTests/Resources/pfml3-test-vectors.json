@@ -1,0 +1,149 @@
+{
+  "description": "PFML3 prompts rendered from the official PLaMo 3 Translate GGUF chat template (bos_token omitted: add it via the tokenizer). Regenerate with tools/gen_pfml3_vectors.py.",
+  "stop": [
+    "<|plamo:tag|>",
+    "<|plamo:bos|>"
+  ],
+  "vectors": [
+    {
+      "name": "basic_en_to_ja",
+      "input": {
+        "text": "The meeting has been rescheduled to next Monday.",
+        "target_lang": "ja"
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>The meeting has been rescheduled to next Monday.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>"
+    },
+    {
+      "name": "ja_to_en",
+      "input": {
+        "text": "会議は来週の月曜日に変更されました。",
+        "target_lang": "en"
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>会議は来週の月曜日に変更されました。<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>"
+    },
+    {
+      "name": "explicit_source",
+      "input": {
+        "text": "Hello.",
+        "source_lang": "en",
+        "target_lang": "ja"
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>Hello.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>"
+    },
+    {
+      "name": "form_plain",
+      "input": {
+        "text": "This system is convenient.",
+        "target_lang": "ja",
+        "form": "plain"
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>This system is convenient.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:key|>form<|plamo:val|>plain<|plamo:msg|>"
+    },
+    {
+      "name": "form_polite",
+      "input": {
+        "text": "This system is convenient.",
+        "target_lang": "ja",
+        "form": "polite"
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>This system is convenient.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:key|>form<|plamo:val|>polite<|plamo:msg|>"
+    },
+    {
+      "name": "context",
+      "input": {
+        "text": "The bank was muddy.",
+        "target_lang": "ja",
+        "context": "They were walking beside a river after heavy rain."
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>context<|plamo:msg|>They were walking beside a river after heavy rain.<|plamo:tag|>input<|plamo:msg|>The bank was muddy.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>"
+    },
+    {
+      "name": "glossary",
+      "input": {
+        "text": "Please open the project dashboard.",
+        "target_lang": "ja",
+        "glossary": [
+          {
+            "source": "dashboard",
+            "target": "管理画面"
+          },
+          {
+            "source": "project",
+            "target": "プロジェクト"
+          }
+        ]
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>glossary<|plamo:index|>dashboard<|plamo:item|>管理画面<|plamo:index|>project<|plamo:item|>プロジェクト<|plamo:tag|>input<|plamo:msg|>Please open the project dashboard.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>"
+    },
+    {
+      "name": "history",
+      "input": {
+        "text": "You can also filter them by owner.",
+        "source_lang": "en",
+        "target_lang": "ja",
+        "history": [
+          {
+            "source": "Open the project dashboard.",
+            "translation": "プロジェクトの管理画面を開きます。"
+          },
+          {
+            "source": "It lists all active tasks.",
+            "translation": "進行中のタスクがすべて表示されます。"
+          }
+        ]
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>Open the project dashboard.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>プロジェクトの管理画面を開きます。<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>It lists all active tasks.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>進行中のタスクがすべて表示されます。<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>You can also filter them by owner.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>"
+    },
+    {
+      "name": "all_options",
+      "input": {
+        "text": "You can also filter them by owner.",
+        "source_lang": "en",
+        "target_lang": "ja",
+        "context": "Help page of a project management tool.",
+        "glossary": [
+          {
+            "source": "owner",
+            "target": "オーナー"
+          }
+        ],
+        "form": "polite",
+        "history": [
+          {
+            "source": "Open the project dashboard.",
+            "translation": "プロジェクトの管理画面を開きます。"
+          },
+          {
+            "source": "It lists all active tasks.",
+            "translation": "進行中のタスクがすべて表示されます。"
+          }
+        ]
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>context<|plamo:msg|>Help page of a project management tool.<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>Open the project dashboard.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>プロジェクトの管理画面を開きます。<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>It lists all active tasks.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>進行中のタスクがすべて表示されます。<|plamo:tag|>glossary<|plamo:index|>owner<|plamo:item|>オーナー<|plamo:tag|>input<|plamo:key|>lang<|plamo:val|>en<|plamo:msg|>You can also filter them by owner.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:key|>form<|plamo:val|>polite<|plamo:msg|>"
+    },
+    {
+      "name": "zh_hans_target",
+      "input": {
+        "text": "Good morning.",
+        "target_lang": "zh-hans"
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>Good morning.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>zh-hans<|plamo:msg|>"
+    },
+    {
+      "name": "easy_japanese",
+      "input": {
+        "text": "Evacuate to higher ground immediately.",
+        "target_lang": "ja(easy)"
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>Evacuate to higher ground immediately.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja(easy)<|plamo:msg|>"
+    },
+    {
+      "name": "multiline_text",
+      "input": {
+        "text": "Line one.\nLine two.\n\nParagraph two with `code`.",
+        "target_lang": "ja"
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>Line one.\nLine two.\n\nParagraph two with `code`.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>"
+    }
+  ]
+}
