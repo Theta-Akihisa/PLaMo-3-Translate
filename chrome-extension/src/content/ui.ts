@@ -1,6 +1,14 @@
 /** ページ内 UI (Shadow DOM)。ページの CSS が漏れ込まないよう、すべて shadow 内に描画する。 */
 
 const CSS = `
+.sel-icon { position: fixed; z-index: 2147483647; width: 26px; height: 26px; display: none; place-items: center; padding: 0;
+  border-radius: 8px; border: 1px solid #d5dae2; background: #fff; color: #2f6fed; font: 700 14px/1 system-ui, sans-serif;
+  box-shadow: 0 2px 8px rgba(0,0,0,.22); cursor: pointer; }
+.sel-icon:hover { background: #eef3ff; }
+button.primary { background:#2f6fed; color:#fff; border-color:transparent; }
+button.primary:hover { background:#2459c4; }
+select { font: inherit; font-size: 12px; border:1px solid #cbd1d9; border-radius:7px; background:#f6f7f9; color:inherit; padding: 2px 4px; max-width: 150px; }
+
 :host { all: initial; }
 * { box-sizing: border-box; }
 .panel {
@@ -28,6 +36,8 @@ button.x { border:none; background:transparent; font-size:16px; line-height:1; p
 .bar button:hover { background:#4a4a4f; }
 .bar .prog { min-width: 5em; font-variant-numeric: tabular-nums; }
 @media (prefers-color-scheme: dark) {
+  .sel-icon { background:#2b2e33; border-color:#454950; color:#8fb0ff; } .sel-icon:hover { background:#363a40; }
+  select { background:#2b2e33; border-color:#454950; }
   .panel { background:#1f2124; color:#ececf0; border-color:#3a3d42; }
   .head { border-color:#32353a; color:#9aa3b0; } .head .title { color:#ececf0; }
   .foot { border-color:#32353a; color:#9aa3b0; }
@@ -72,6 +82,8 @@ function el<K extends keyof HTMLElementTagNameMap>(
 export interface PanelHandlers {
   onClose: () => void;
   onCopy: () => Promise<boolean> | boolean;
+  onReplace?: () => void;
+  onChange: (target: string, form: string) => void;
 }
 
 export class Panel {
@@ -79,25 +91,50 @@ export class Panel {
   private body = el('div', 'body dim', '準備中…');
   private foot = el('span', '', '');
   private copyBtn = el('button', '', 'コピー');
-  private langEl = el('span', 'lang', '');
+  private replaceBtn = el('button', 'primary', '置き換え');
+  private targetSel = el('select');
+  private formSel = el('select');
+  private closed = false;
+  private keyHandler: (e: KeyboardEvent) => void;
 
   constructor(
     private h: PanelHandlers,
     anchor: { x: number; y: number; w: number; h: number },
+    opts: { target: string; form: string; langs: { code: string; ja: string }[] },
   ) {
     const head = el('div', 'head');
-    head.append(el('span', 'title', 'PLaMo 翻訳'), this.langEl, el('span', 'sp'));
+    for (const l of opts.langs) this.targetSel.add(new Option(l.ja, l.code));
+    this.targetSel.value = opts.target;
+    this.targetSel.setAttribute('aria-label', '翻訳先の言語');
+    for (const [v, t] of [['none', '文体: 自動'], ['plain', '常体'], ['polite', '敬体']]) this.formSel.add(new Option(t, v));
+    this.formSel.value = opts.form;
+    this.formSel.setAttribute('aria-label', '文体');
+    const fire = () => this.h.onChange(this.targetSel.value, this.formSel.value);
+    this.targetSel.addEventListener('change', () => {
+      this.formSel.style.display = this.targetSel.value === 'ja' ? '' : 'none';
+      fire();
+    });
+    this.formSel.addEventListener('change', fire);
+    this.formSel.style.display = opts.target === 'ja' ? '' : 'none';
     const x = el('button', 'x', '×');
     x.title = '閉じる (Esc)';
     x.addEventListener('click', () => this.close());
-    head.append(x);
+    head.append(el('span', 'title', 'PLaMo'), this.targetSel, this.formSel, el('span', 'sp'), x);
     const foot = el('div', 'foot');
     this.copyBtn.addEventListener('click', async () => {
       const ok = await this.h.onCopy();
       this.copyBtn.textContent = ok ? 'コピーしました' : 'コピー失敗';
       setTimeout(() => (this.copyBtn.textContent = 'コピー'), 1500);
     });
-    foot.append(this.foot, el('span', 'sp'), this.copyBtn);
+    foot.append(this.foot, el('span', 'sp'));
+    if (this.h.onReplace) {
+      this.replaceBtn.addEventListener('click', () => {
+        this.h.onReplace?.();
+        this.close();
+      });
+      foot.append(this.replaceBtn);
+    }
+    foot.append(this.copyBtn);
     this.box.append(head, this.body, foot);
     getRoot().appendChild(this.box);
     this.place(anchor);
@@ -107,25 +144,22 @@ export class Panel {
     document.addEventListener('keydown', this.keyHandler, true);
   }
 
-  private keyHandler: (e: KeyboardEvent) => void;
-  private closed = false;
-
   private place(a: { x: number; y: number; w: number; h: number }): void {
     const margin = 8;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const width = Math.min(420, vw - 24);
-    let left = Math.min(Math.max(12, a.x), vw - width - 12);
+    const left = Math.min(Math.max(12, a.x), vw - width - 12);
     let top = a.y + a.h + margin;
-    const approxH = 180;
+    const approxH = 200;
     if (top + approxH > vh && a.y - approxH - margin > 0) top = a.y - approxH - margin;
-    top = Math.min(Math.max(12, top), Math.max(12, vh - 120));
+    top = Math.min(Math.max(12, top), Math.max(12, vh - 140));
     this.box.style.left = `${left}px`;
     this.box.style.top = `${top}px`;
   }
 
-  setLang(label: string): void {
-    this.langEl.textContent = label ? `→ ${label}` : '';
+  contains(n: Node | null): boolean {
+    return !!n && this.box.contains(n);
   }
   setStatus(t: string): void {
     this.foot.textContent = t;
@@ -142,6 +176,10 @@ export class Panel {
     this.body.className = 'body err';
     this.body.textContent = t;
   }
+  setTarget(code: string): void {
+    this.targetSel.value = code;
+    this.formSel.style.display = code === 'ja' ? '' : 'none';
+  }
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -151,11 +189,43 @@ export class Panel {
   }
 }
 
+/** 選択テキストの横に出る小さな翻訳アイコン (DeepL 風) */
+export class SelectionIcon {
+  private btn = el('button', 'sel-icon');
+  constructor(onClick: () => void) {
+    this.btn.title = 'PLaMoで翻訳';
+    this.btn.setAttribute('aria-label', 'PLaMoで翻訳');
+    this.btn.textContent = 'P';
+    this.btn.style.display = 'none';
+    // 選択を壊さない
+    this.btn.addEventListener('mousedown', (e) => e.preventDefault());
+    this.btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onClick();
+    });
+    getRoot().appendChild(this.btn);
+  }
+  show(x: number, y: number): void {
+    const left = Math.min(Math.max(4, x), window.innerWidth - 32);
+    const top = Math.min(Math.max(4, y), window.innerHeight - 32);
+    this.btn.style.left = `${left}px`;
+    this.btn.style.top = `${top}px`;
+    this.btn.style.display = 'grid';
+  }
+  hide(): void {
+    this.btn.style.display = 'none';
+  }
+  contains(n: Node | null): boolean {
+    return !!n && this.btn === n;
+  }
+}
+
 export class ProgressBar {
   private bar = el('div', 'bar');
   private prog = el('span', 'prog', '');
-  private stop = el('button', '', '停止');
-  private restore = el('button', '', '元に戻す');
+  private stop = el('button', '', '翻訳を停止');
+  private restore = el('button', '', '原文に戻す');
   constructor(handlers: { onStop: () => void; onRestore: () => void }) {
     this.stop.addEventListener('click', handlers.onStop);
     this.restore.addEventListener('click', handlers.onRestore);

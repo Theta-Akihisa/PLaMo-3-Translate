@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PLaMo 翻訳 設定</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<main>
+  <h1><span class="logo">P</span> PLaMo 3 Translate 設定</h1>
+  <p class="lead">すべてローカルで翻訳します。変更は自動で保存されます。<span id="saved" class="saved"></span></p>
+
+  <section class="card">
+    <h2>バックエンド</h2>
+    <label class="choice"><input type="radio" name="backend" value="server">
+      <span><b>ローカルサーバー</b> <small>(推奨)</small><br>
+      llama-server または macOS アプリの API サーバーに接続します。0.8B / 2B / 8B すべて利用可能で、速度も最速です。</span></label>
+    <label class="choice"><input type="radio" name="backend" value="wasm">
+      <span><b>ブラウザ内 (WASM)</b> <span class="tag warn">実験的</span><br>
+      wllama (llama.cpp の WebAssembly 版) をブラウザ内で実行します。サーバー不要ですが遅く、0.8B / 2B のみ。
+      <span id="wasmNote" class="note"></span></span></label>
+
+    <div id="serverBox" class="sub">
+      <div class="row"><label for="endpoint">エンドポイント</label>
+        <input id="endpoint" type="url" placeholder="http://127.0.0.1:8080">
+        <button id="testConn">接続テスト</button></div>
+      <div id="connResult" class="result"></div>
+      <p class="hint">起動例: <code>scripts/run-llama-server.sh 0.8b</code> (Windows: <code>scripts\run-llama-server.ps1</code>)。macOS アプリの内蔵 API サーバーも同じ <code>8080</code> ポートで使えます。</p>
+    </div>
+
+    <div id="wasmBox" class="sub">
+      <div class="row"><button id="prepare">モデルをダウンロード / 読み込み</button><span id="prepResult" class="result inline"></span></div>
+      <div id="prepProgress" class="progress" hidden><div></div></div>
+      <h3>ダウンロード済みモデル (キャッシュ)</h3>
+      <div id="cacheList" class="cache"></div>
+      <div class="row"><button id="refreshCache">更新</button><button id="clearCache" class="danger">キャッシュをすべて削除</button></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>モデル</h2>
+    <div class="row"><label for="modelSize">サイズ</label><select id="modelSize"></select></div>
+    <p id="sizeNote" class="hint"></p>
+    <div class="row"><label for="quant">量子化</label><select id="quant"></select></div>
+    <p class="hint">PLaMo 3 Translate は <a href="https://plamo.preferredai.jp/info/plamo-community-license-ja" target="_blank" rel="noreferrer">PLaMo Community License</a> の下で提供されています。</p>
+  </section>
+
+  <section class="card">
+    <h2>翻訳</h2>
+    <div class="row"><label for="targetLang">既定の翻訳先</label><select id="targetLang"></select></div>
+    <div class="row"><label for="sourceLang">既定の翻訳元</label><select id="sourceLang"></select></div>
+    <div class="row"><label for="form">文体 (翻訳先が日本語のとき)</label>
+      <select id="form"><option value="none">自動</option><option value="plain">常体 (だ・である)</option><option value="polite">敬体 (です・ます)</option></select></div>
+    <div class="row"><label for="maxTokens">最大トークン数</label><input id="maxTokens" type="number" min="16" max="8192" step="16"></div>
+    <div class="row col"><label for="context">文脈 (任意。翻訳の参考になる背景説明)</label>
+      <textarea id="context" rows="2" placeholder="例: プロジェクト管理ツールのヘルプページ"></textarea></div>
+    <h3>用語集</h3>
+    <div id="glossary"></div>
+    <button id="addTerm">+ 用語を追加</button>
+  </section>
+
+  <section class="card">
+    <h2>操作</h2>
+    <label class="check"><input type="checkbox" id="showSelectionIcon"> テキスト選択時に翻訳アイコンを表示する (オフでも右クリックメニュー・ショートカットは使えます)</label>
+    <label class="check"><input type="checkbox" id="liveTranslate"> ポップアップで入力中に自動翻訳する</label>
+    <div class="row"><label for="historyParagraphs">ページ翻訳で参照する直前の段落数</label>
+      <select id="historyParagraphs"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select></div>
+    <p class="hint">キーボードショートカット: <code>Alt+Shift+T</code> 選択範囲を翻訳 / <code>Alt+Shift+P</code> ページ翻訳。変更は <code>chrome://extensions/shortcuts</code> で。</p>
+  </section>
+
+  <details class="card">
+    <summary>詳細設定 (上級者向け)</summary>
+    <div class="row col"><label for="modelUrlOverride">WASM 用モデル URL の上書き</label>
+      <input id="modelUrlOverride" type="url" placeholder="空欄で Hugging Face の公式 GGUF を使用"></div>
+    <div class="row"><label for="wasmThreads">WASM スレッド数 (0 = 自動)</label><input id="wasmThreads" type="number" min="0" max="32"></div>
+    <button id="resetAll" class="danger">設定を初期化</button>
+  </details>
+
+  <footer>
+    <p>プライバシー: 翻訳テキストは端末の外へ送信されません。通信が発生するのはモデルのダウンロード (Hugging Face) とローカルサーバー (127.0.0.1) への接続のみです。</p>
+  </footer>
+</main>
+<script type="module" src="options.js"></script>
+</body>
+</html>

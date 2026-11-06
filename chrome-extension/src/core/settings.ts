@@ -20,6 +20,10 @@ export interface Settings {
   wasmThreads: number;
   /** ページ翻訳で直前の段落を history として渡す数 */
   historyParagraphs: number;
+  /** 選択テキストの横に翻訳アイコンを表示する (DeepL 風) */
+  showSelectionIcon: boolean;
+  /** 入力しながら自動翻訳 (ポップアップ) */
+  liveTranslate: boolean;
 }
 
 /**
@@ -40,6 +44,8 @@ export const DEFAULT_SETTINGS: Settings = {
   modelUrlOverride: '',
   wasmThreads: 0,
   historyParagraphs: 2,
+  showSelectionIcon: true,
+  liveTranslate: true,
 };
 
 const KEY = 'settings';
@@ -58,6 +64,6 @@ export async function saveSettings(patch: Partial<Settings>): Promise<Settings> 
 
 export function onSettingsChanged(cb: (s: Settings) => void): void {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes[KEY]) cb({ ...DEFAULT_SETTINGS, ...changes[KEY].newValue });
+    if (area === 'local' && changes[KEY]) cb({ ...DEFAULT_SETTINGS, ...(changes[KEY].newValue as Partial<Settings>) });
   });
 }
