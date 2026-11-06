@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PLaMo 翻訳</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">P</span><span class="name">PLaMo 3 Translate</span></div>
+  <button id="openOptions" class="icon" title="設定" aria-label="設定">⚙</button>
+</header>
+
+<section class="langbar">
+  <select id="sourceLang" aria-label="翻訳元の言語"></select>
+  <button id="swap" class="icon" title="言語を入れ替え" aria-label="言語を入れ替え">⇄</button>
+  <select id="targetLang" aria-label="翻訳先の言語"></select>
+</section>
+
+<div id="formRow" class="form-row" hidden>
+  <span class="lbl">文体</span>
+  <label><input type="radio" name="form" value="none"> 自動</label>
+  <label><input type="radio" name="form" value="plain"> 常体</label>
+  <label><input type="radio" name="form" value="polite"> 敬体</label>
+</div>
+
+<section class="card">
+  <div class="pane src">
+    <textarea id="input" placeholder="ここにテキストを入力" rows="5" spellcheck="false"></textarea>
+    <div class="pane-foot">
+      <span id="count" class="count">0</span>
+      <span class="sp"></span>
+      <button id="clear" class="small ghost" hidden>クリア</button>
+    </div>
+  </div>
+  <div class="divider"><span id="meta" class="meta"></span><button id="stop" class="small" hidden>停止</button></div>
+  <div class="pane dst">
+    <div id="output" class="output empty" aria-live="polite">翻訳結果がここに表示されます</div>
+    <div class="pane-foot">
+      <span class="sp"></span>
+      <button id="translate" class="small ghost" title="今すぐ翻訳 (Ctrl/⌘+Enter)">翻訳</button>
+      <button id="copy" class="small" disabled>コピー</button>
+    </div>
+  </div>
+</section>
+
+<section class="page">
+  <button id="pageTranslate">このページを翻訳</button>
+  <button id="pageRestore" hidden>原文に戻す</button>
+  <span id="pageState" class="meta"></span>
+</section>
+
+<div id="statusRow" class="status" data-state="idle">
+  <span class="dot"></span>
+  <span id="statusText">確認中…</span>
+</div>
+<div id="progressWrap" class="progress" hidden><div id="progressBar"></div></div>
+
+<script type="module" src="popup.js"></script>
+</body>
+</html>

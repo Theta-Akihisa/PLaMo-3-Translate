@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "PLaMo 3 Translate",
+  "short_name": "PLaMo 翻訳",
+  "version": "0.1.0",
+  "description": "PFN の PLaMo 3 Translate をローカルで動かす翻訳拡張機能。テキストもページも、端末の外に送信せず翻訳します。",
+  "minimum_chrome_version": "116",
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "action": {
+    "default_title": "PLaMo 翻訳",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" }
+  },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle", "all_frames": false }
+  ],
+  "permissions": ["storage", "contextMenus", "offscreen"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://huggingface.co/*",
+    "https://*.hf.co/*"
+  ],
+  "commands": {
+    "translate-selection": {
+      "suggested_key": { "default": "Alt+Shift+T" },
+      "description": "選択したテキストを翻訳"
+    },
+    "translate-page": {
+      "suggested_key": { "default": "Alt+Shift+P" },
+      "description": "ページ全体を翻訳 / 原文に戻す"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "cross_origin_embedder_policy": { "value": "require-corp" },
+  "cross_origin_opener_policy": { "value": "same-origin" }
+}
