@@ -1,0 +1,206 @@
+{# GGUF template for llama.cpp (embedded as tokenizer.chat_template and shipped as chat_template.jinja). #}
+{# No add_generation_prompt guard; target_lang defaults to ja. PFML translation content matches the HF template. #}
+{# Leading system messages: a block starting with the line [plamo-translate] carries settings (target_lang=, #}
+{# source_lang=, form=, and glossary=source => target, one key=value per line, glossary repeatable; ended by a --- #}
+{# line); the rest of the system text is reference #}
+{# context (CR stripped from line ends; other text verbatim). Explicit chat_template_kwargs take precedence per key. #}
+{# System text never joins the source text. llama.cpp maps the developer role to system before rendering. #}
+{# Emptiness is judged on ASCII whitespace only (space, tab, CR, LF) so that minja and HF Jinja agree. #}
+{%- macro check_text(value, name, allow_empty=false) -%}
+    {%- if value is not string -%}
+        {{- raise_exception(name + ' must be a string.') -}}
+    {%- endif -%}
+    {%- if not allow_empty and not value.strip(' \t\r\n') -%}
+        {{- raise_exception(name + ' must not be empty.') -}}
+    {%- endif -%}
+    {%- if '<|plamo:' in value -%}
+        {{- raise_exception(name + ' must not contain reserved PFML tokens (<|plamo:...).') -}}
+    {%- endif -%}
+{%- endmacro -%}
+{%- macro check_lang(value, name) -%}
+    {{- check_text(value, name) -}}
+    {%- if value != 'ja(easy)' -%}
+        {%- set parts = value.split('-') -%}
+        {%- if parts | length > 2 or parts[0] | length not in [2, 3] or (parts | length == 2 and parts[1] | length != 4) -%}
+            {{- raise_exception(name + ' must be a lowercase language code, e.g. en, ja, zh-hans, or ja(easy).') -}}
+        {%- endif -%}
+        {%- set leftover = value | replace('a', '') | replace('b', '') | replace('c', '') | replace('d', '') | replace('e', '') | replace('f', '') | replace('g', '') | replace('h', '') | replace('i', '') | replace('j', '') | replace('k', '') | replace('l', '') | replace('m', '') | replace('n', '') | replace('o', '') | replace('p', '') | replace('q', '') | replace('r', '') | replace('s', '') | replace('t', '') | replace('u', '') | replace('v', '') | replace('w', '') | replace('x', '') | replace('y', '') | replace('z', '') | replace('-', '') -%}
+        {%- if leftover | length != 0 -%}
+            {{- raise_exception(name + ' must use lowercase language codes without region subtags.') -}}
+        {%- endif -%}
+    {%- endif -%}
+{%- endmacro -%}
+{%- set sys = namespace(count=0, target_lang=none, source_lang=none, form=none, context='', has_context=false, glossary=[], has_glossary=false) -%}
+{%- for message in messages -%}
+    {%- if message is not mapping -%}
+        {{- raise_exception('Each message must contain a role and text content.') -}}
+    {%- endif -%}
+    {%- if loop.index0 == sys.count and message['role'] == 'system' -%}
+        {%- if message['tool_calls'] or message['tool_call_id'] or message['function_call'] -%}
+            {{- raise_exception('Tool calls are not supported.') -}}
+        {%- endif -%}
+        {{- check_text(message['content'], 'system message content', allow_empty=true) -}}
+        {%- set lines = message['content'].split('\n') -%}
+        {%- set first = lines[0].strip(' \t\r') -%}
+        {%- if first | lower != first and (first | lower).startswith('[plamo-translate') -%}
+            {{- raise_exception('The settings block must start with the exact line [plamo-translate].') -}}
+        {%- elif first.startswith('[plamo-translate') and first != '[plamo-translate]' -%}
+            {{- raise_exception('The settings block must start with the exact line [plamo-translate].') -}}
+        {%- endif -%}
+        {%- set block = namespace(settings=(first == '[plamo-translate]'), body='', started=false) -%}
+        {%- for raw_line in lines -%}
+            {%- if block.settings and loop.index0 > 0 -%}
+                {%- set line = raw_line.strip(' \t\r') -%}
+                {%- if line == '---' -%}
+                    {%- set block.settings = false -%}
+                {%- elif line -%}
+                    {%- set parts = line.split('=') -%}
+                    {%- set key = parts[0].strip(' \t') -%}
+                    {%- if key == 'glossary' -%}
+                        {%- set pair = (parts[1:] | join('=')).split('=>') -%}
+                        {%- if pair | length != 2 or not pair[0].strip(' \t') or not pair[1].strip(' \t') -%}
+                            {{- raise_exception('Each glossary line must be glossary=source term => target term: ' + line) -}}
+                        {%- endif -%}
+                        {{- check_text(pair[0].strip(' \t'), 'glossary source') -}}
+                        {{- check_text(pair[1].strip(' \t'), 'glossary target') -}}
+                        {%- set sys.glossary = sys.glossary + [{'source': pair[0].strip(' \t'), 'target': pair[1].strip(' \t')}] -%}
+                        {%- set sys.has_glossary = true -%}
+                    {%- else -%}
+                    {%- if parts | length != 2 -%}
+                        {{- raise_exception('Each line of the [plamo-translate] block must be key=value: ' + line) -}}
+                    {%- endif -%}
+                    {%- set value = parts[1].strip(' \t') -%}
+                    {%- if key not in ['target_lang', 'source_lang', 'form'] -%}
+                        {{- raise_exception('Unknown setting in the [plamo-translate] block: ' + key) -}}
+                    {%- endif -%}
+                    {%- if not value -%}
+                        {{- raise_exception('Empty value in the [plamo-translate] block: ' + key) -}}
+                    {%- endif -%}
+                    {%- if key == 'target_lang' -%}
+                        {%- if sys.target_lang is not none -%}
+                            {{- raise_exception('target_lang is set more than once in the [plamo-translate] block.') -}}
+                        {%- endif -%}
+                        {%- set sys.target_lang = value -%}
+                    {%- elif key == 'source_lang' -%}
+                        {%- if sys.source_lang is not none -%}
+                            {{- raise_exception('source_lang is set more than once in the [plamo-translate] block.') -}}
+                        {%- endif -%}
+                        {%- set sys.source_lang = value -%}
+                    {%- else -%}
+                        {%- if sys.form is not none -%}
+                            {{- raise_exception('form is set more than once in the [plamo-translate] block.') -}}
+                        {%- endif -%}
+                        {%- set sys.form = value -%}
+                    {%- endif -%}
+                    {%- endif -%}
+                {%- endif -%}
+            {%- elif not (loop.index0 == 0 and first == '[plamo-translate]') -%}
+                {%- set block.body = block.body + ('\n' if block.started else '') + raw_line.rstrip('\r') -%}
+                {%- set block.started = true -%}
+            {%- endif -%}
+        {%- endfor -%}
+        {%- if block.body.strip(' \t\r\n') -%}
+            {%- set sys.context = sys.context + ('\n\n' if sys.has_context else '') + block.body -%}
+            {%- set sys.has_context = true -%}
+        {%- endif -%}
+        {%- set sys.count = sys.count + 1 -%}
+    {%- endif -%}
+{%- endfor -%}
+{%- set translation_messages = messages[sys.count:] -%}
+{# Settings given in the system block are validated even when chat_template_kwargs override them. #}
+{%- if sys.target_lang is not none -%}
+    {{- check_lang(sys.target_lang, 'target_lang') -}}
+{%- endif -%}
+{%- if sys.source_lang is not none -%}
+    {{- check_lang(sys.source_lang, 'source_lang') -}}
+{%- endif -%}
+{%- if sys.form is not none and sys.form not in ['polite', 'plain'] -%}
+    {{- raise_exception('form must be polite or plain.') -}}
+{%- endif -%}
+{%- if target_lang is not defined -%}
+    {%- set target_lang = sys.target_lang if sys.target_lang is not none else 'ja' -%}
+{%- endif -%}
+{%- if source_lang is not defined -%}
+    {%- set source_lang = sys.source_lang -%}
+{%- endif -%}
+{%- if form is not defined -%}
+    {%- set form = sys.form -%}
+{%- endif -%}
+{%- if context is not defined -%}
+    {%- set context = sys.context if sys.has_context else none -%}
+{%- endif -%}
+{%- if glossary is not defined -%}
+    {%- set glossary = sys.glossary if sys.has_glossary else none -%}
+{%- endif -%}
+{%- if translation_messages | length == 0 or translation_messages | length % 2 != 1 -%}
+    {{- raise_exception('Provide source/translation pairs followed by one user message.') -}}
+{%- endif -%}
+{%- for message in translation_messages -%}
+    {%- if message is not mapping -%}
+        {{- raise_exception('Each message must contain a role and text content.') -}}
+    {%- endif -%}
+    {%- if (loop.index0 % 2 == 0 and message['role'] != 'user') or (loop.index0 % 2 == 1 and message['role'] != 'assistant') -%}
+        {{- raise_exception('Alternate user source text and assistant translation; end with user.') -}}
+    {%- endif -%}
+    {%- if message['tool_calls'] or message['tool_call_id'] or message['function_call'] -%}
+        {{- raise_exception('Tool calls are not supported.') -}}
+    {%- endif -%}
+    {{- check_text(message['content'], 'message content') -}}
+{%- endfor -%}
+{%- if tools or documents -%}
+    {{- raise_exception('Tool calls and documents are not supported; use context for reference text.') -}}
+{%- endif -%}
+{{- check_lang(target_lang, 'target_lang') -}}
+{%- if source_lang is defined and source_lang is not none -%}
+    {{- check_lang(source_lang, 'source_lang') -}}
+{%- endif -%}
+{%- if context is defined and context is not none -%}
+    {{- check_text(context, 'context', allow_empty=true) -}}
+{%- endif -%}
+{%- if form is defined and form is not none -%}
+    {%- if form not in ['polite', 'plain'] or target_lang != 'ja' -%}
+        {{- raise_exception('form must be polite or plain and requires target_lang="ja".') -}}
+    {%- endif -%}
+{%- endif -%}
+{%- if glossary is defined and glossary is not none -%}
+    {%- if glossary is not sequence or glossary is string or glossary is mapping -%}
+        {{- raise_exception('glossary must be a list of objects with source and target strings.') -}}
+    {%- endif -%}
+    {%- for term in glossary -%}
+        {%- if term is not mapping or term | length != 2 or 'source' not in term or 'target' not in term -%}
+            {{- raise_exception('Each glossary entry must contain exactly source and target.') -}}
+        {%- endif -%}
+        {{- check_text(term['source'], 'glossary source') -}}
+        {{- check_text(term['target'], 'glossary target') -}}
+    {%- endfor -%}
+{%- endif -%}
+{{- bos_token + '<|plamo:tag|>dataset<|plamo:msg|>translation' -}}
+{%- if context is defined and context -%}
+    {{- '<|plamo:tag|>context<|plamo:msg|>' + context -}}
+{%- endif -%}
+{%- for message in translation_messages[:-1] -%}
+    {%- if message['role'] == 'user' -%}
+        {{- '<|plamo:tag|>input' -}}
+        {%- if source_lang is defined and source_lang is not none -%}
+            {{- '<|plamo:key|>lang<|plamo:val|>' + source_lang -}}
+        {%- endif -%}
+    {%- else -%}
+        {{- '<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>' + target_lang -}}
+    {%- endif -%}
+    {{- '<|plamo:msg|>' + message['content'] -}}
+{%- endfor -%}
+{%- if glossary is defined and glossary -%}
+    {{- '<|plamo:tag|>glossary' -}}
+    {%- for term in glossary -%}
+        {{- '<|plamo:index|>' + term['source'] + '<|plamo:item|>' + term['target'] -}}
+    {%- endfor -%}
+{%- endif -%}
+{{- '<|plamo:tag|>input' -}}
+{%- if source_lang is defined and source_lang is not none -%}
+    {{- '<|plamo:key|>lang<|plamo:val|>' + source_lang -}}
+{%- endif -%}
+{{- '<|plamo:msg|>' + translation_messages[-1]['content'] + '<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>' + target_lang -}}
+{%- if form is defined and form is not none -%}
+    {{- '<|plamo:key|>form<|plamo:val|>' + form -}}
+{%- endif -%}
+{{- '<|plamo:msg|>' -}}

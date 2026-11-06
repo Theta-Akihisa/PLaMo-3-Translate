@@ -1,0 +1,16 @@
+# macOS / Xcode
+.DS_Store
+xcuserdata/
+DerivedData/
+*.xcodeproj/
+.build/
+.swiftpm/
+apple/Frameworks/
+
+# Node
+node_modules/
+dist/
+*.zip
+
+# Models
+*.gguf
