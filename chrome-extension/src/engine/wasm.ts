@@ -6,7 +6,7 @@ import { STOP } from '../core/catalog';
 export function friendlyLoadError(raw: string): string {
   if (/unknown tokenizer|unknown model architecture|plamo3/i.test(raw)) {
     return (
-      `このブラウザ内エンジン (wllama ${Wllama.getLibllamaVersion?.() ?? ''}) に含まれる llama.cpp は ` +
+      `同梱の wllama 3.8.1 (llama.cpp ${Wllama.getLibllamaVersion?.() ?? ''}) は ` +
       'PLaMo 3 のトークナイザに未対応のため、モデルを読み込めません。' +
       '設定でバックエンドを「ローカルサーバー」に切り替えてください。' +
       ` (詳細: ${raw.split('\n')[0].slice(0, 160)})`
@@ -15,7 +15,11 @@ export function friendlyLoadError(raw: string): string {
   return raw;
 }
 
+/** ネイティブ (llama.cpp) のログを保持して、読み込み失敗を検出する。wllama 3.x は語彙読み込み失敗でも例外を投げない。 */
+const LOAD_ERROR_RE = /error loading model|unknown tokenizer|unknown model architecture|failed to load model/i;
+
 export class WasmEngine {
+  private nativeLog: string[] = [];
   private wllama: Wllama | null = null;
   private loadedKey = '';
   private status: EngineStatus = { backend: 'wasm', state: 'idle' };
@@ -51,7 +55,16 @@ export class WasmEngine {
     }
 
     this.set({ state: 'downloading', loaded: 0, total: model.sizeBytes, modelLabel: model.label, message: undefined });
-    const w = new Wllama({ default: chrome.runtime.getURL('wllama.wasm') }, { suppressNativeLog: true });
+    this.nativeLog = [];
+    const capture = (...a: unknown[]) => {
+      const line = a.map(String).join(' ');
+      if (LOAD_ERROR_RE.test(line)) this.nativeLog.push(line);
+    };
+    const logger = { ...console, debug: capture, log: capture, warn: capture, error: capture };
+    const w = new Wllama(
+      { default: chrome.runtime.getURL('wllama.wasm') },
+      { logger: logger as never },
+    );
     const progressCallback: DownloadProgressCallback = ({ loaded, total }) => {
       this.set({ state: 'downloading', loaded, total: total || model.sizeBytes });
     };
@@ -63,7 +76,7 @@ export class WasmEngine {
         useCache: true,
         progressCallback,
       });
-      // ダウンロードが終わるとここでロード完了
+      if (this.nativeLog.length) throw new Error(this.nativeLog[0]);
     } catch (e) {
       const msg = friendlyLoadError(e instanceof Error ? e.message : String(e));
       this.set({ state: 'error', message: msg });
@@ -115,6 +128,7 @@ export class WasmEngine {
         }
       }
     } catch (e) {
+      if (this.nativeLog.length) throw new Error(friendlyLoadError(this.nativeLog[0]));
       if (opts.signal.aborted || e instanceof WllamaAbortError || (e as Error)?.name === 'AbortError') {
         throw new WllamaAbortError();
       }

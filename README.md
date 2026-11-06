@@ -7,9 +7,10 @@ Preferred Networks の翻訳特化 LLM **[PLaMo 3 Translate](https://huggingface
 | --- | --- | --- | --- |
 | iOS / iPadOS | [`apple/`](apple/README.md) | llama.cpp（Metal）XCFramework | 0.8B（既定）/ 2B / 8B※ |
 | macOS | [`apple/`](apple/README.md) | llama.cpp（Metal）XCFramework | 0.8B（既定）/ 2B / 8B |
-| Google Chrome 拡張機能 | [`chrome-extension/`](chrome-extension/README.md) | ブラウザ内 WASM（wllama）またはローカルサーバー | 0.8B（既定）/ 2B / 8B（ローカルサーバー） |
+| Google Chrome 拡張機能 | [`chrome-extension/`](chrome-extension/README.md) | ローカルサーバー（llama-server または macOS アプリの内蔵 API）。ブラウザ内 WASM は実験的※※ | 0.8B（既定）/ 2B / 8B |
 
 ※ 8B は RAM 8GB 以上の iPhone / iPad を推奨。
+※※ npm 最新の wllama 3.8.1（llama.cpp b11364）は PLaMo 3 のトークナイザ（`plamo3`）に未対応のため、現時点ではブラウザ内推論でモデルを読み込めません。wllama が新しい llama.cpp に追従したら依存を更新するだけで有効になります。
 
 ## 構成
 
@@ -38,3 +39,8 @@ tools/             テストベクタ生成スクリプト
 - モデル（ダウンロードして使用）: [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-ja)。
   個人・非商用利用は登録不要で無償。商用利用は条件付き（売上 10 億円以下は登録フォームで無償、超える場合は別途契約）。
 - llama.cpp / wllama: MIT License
+
+## UI
+
+DeepL を参考にした操作感です：左右（iPhone は上下）2 ペイン、入力しながら自動翻訳、言語の自動検出、文体（常体／敬体）、用語集。
+macOS では任意のアプリで **⌘C を 2 回** 押すと選択テキストをフローティングウィンドウで翻訳します。Chrome では選択テキスト横のアイコン・右クリック・ページ全体翻訳に対応します。

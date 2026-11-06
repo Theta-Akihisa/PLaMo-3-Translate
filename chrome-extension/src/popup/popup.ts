@@ -126,7 +126,7 @@ async function doTranslate() {
     autoOpt().text = det.guess ? `${langJa(det.guess)}（検出）` : '言語を検出';
     // 信頼できる検出結果のときだけモデルに翻訳元を渡す
     source = det.code ?? 'auto';
-    const nt = smartTarget(det.code, target);
+    const nt = smartTarget(det.guess, target);
     if (nt !== target) {
       target = nt;
       targetSel.value = nt;
