@@ -7,7 +7,7 @@ Preferred Networks の翻訳特化 LLM **[PLaMo 3 Translate](https://huggingface
 | --- | --- | --- | --- |
 | iOS / iPadOS | [`apple/`](apple/README.md) | llama.cpp（Metal）XCFramework | 0.8B（既定）/ 2B / 8B※ |
 | macOS | [`apple/`](apple/README.md) | llama.cpp（Metal）XCFramework | 0.8B（既定）/ 2B / 8B |
-| Google Chrome 拡張機能 | [`chrome-extension/`](chrome-extension/README.md) | ローカルサーバー（llama-server または macOS アプリの内蔵 API）。ブラウザ内 WASM は実験的※※ | 0.8B（既定）/ 2B / 8B |
+| Google Chrome 拡張機能 | [`chrome-extension/`](chrome-extension/README.md) | **macOS アプリを呼び出す（既定）**。上級者向けに llama-server、実験的にブラウザ内 WASM※※ | 0.8B（既定）/ 2B / 8B（macOS アプリでダウンロードしたもの） |
 
 ※ 8B は RAM 8GB 以上の iPhone / iPad を推奨。
 ※※ npm 最新の wllama 3.8.1（llama.cpp b11364）は PLaMo 3 のトークナイザ（`plamo3`）に未対応のため、現時点ではブラウザ内推論でモデルを読み込めません。wllama が新しい llama.cpp に追従したら依存を更新するだけで有効になります。
@@ -31,7 +31,8 @@ tools/             テストベクタ生成スクリプト
 - **プロンプトは各アプリが PFML3 形式で直接組み立てます**（公式モデルカード推奨の方法）。公式チャットテンプレートから生成したテストベクタ
   [`shared/pfml3-test-vectors.json`](shared/pfml3-test-vectors.json) と完全一致することを各実装のテストで確認します。
 - 翻訳オプション：翻訳先 / 翻訳元（省略時は自動判定）/ 常体・敬体 / 用語集 / 参考文脈 / 対訳履歴（直前の段落を渡して訳語・文体を揃える）。
-- macOS アプリはオプションで `127.0.0.1` に llama-server 互換 API（`/v1/completions` など）を公開でき、Chrome 拡張機能のバックエンドとして使えます。
+- **Chrome 拡張機能は macOS アプリを翻訳エンジンとして呼び出します**。macOS アプリは起動中 `http://127.0.0.1:18080` に llama-server 互換 API を公開し（既定で有効・外部や一般の Web ページからは接続不可）、
+  拡張機能から使用モデル（0.8B / 2B / 8B）も切り替えられます。仕様は [`shared/local-api.md`](shared/local-api.md)。
 
 ## ライセンス
 
