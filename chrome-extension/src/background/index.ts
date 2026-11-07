@@ -1,4 +1,4 @@
-import { loadSettings, type Settings } from '../core/settings';
+import { endpointOf, loadSettings, type Settings } from '../core/settings';
 import { cleanOutput, Pfml3Error } from '../core/pfml3';
 import { promptFor } from '../core/util';
 import { getModel, getModelFile, WASM_SIZES, type SizeId } from '../core/catalog';
@@ -6,6 +6,8 @@ import {
   PORT_ENGINE_PREFIX,
   PORT_TRANSLATE,
   type ClientToSw,
+  type AppModelsResult,
+  type AppSelectResult,
   type EngineStatus,
   type ModelSpec,
   type OffscreenToSw,
@@ -14,7 +16,15 @@ import {
   type SwToOffscreen,
   type TranslateRequest,
 } from '../core/protocol';
-import { checkHealth, serverComplete } from '../engine/local-server';
+import {
+  APP_LAUNCH_URL,
+  checkHealth,
+  listAppModels,
+  modelLabelOf,
+  selectAppModel,
+  serverComplete,
+  type HealthResult,
+} from '../engine/local-server';
 
 // ---------------------------------------------------------------- queue
 // エンジンは 1 つなのでジョブは直列化する。
@@ -72,9 +82,10 @@ async function pump(): Promise<void> {
           job.send({ op: 'chunk', id: job.id, text: cleanOutput(acc) });
         };
         const raw =
-          s.backend === 'server'
+          s.backend === 'app' || s.backend === 'server'
             ? await serverComplete({
-                endpoint: s.endpoint,
+                kind: s.backend,
+                endpoint: endpointOf(s),
                 prompt,
                 maxTokens: s.maxTokens,
                 signal: job.ctl.signal,
@@ -131,7 +142,7 @@ function modelSpec(s: Settings): ModelSpec {
   const size: SizeId = s.modelSize;
   if (!WASM_SIZES.includes(size)) {
     throw new Error(
-      `${getModel(size).label} モデルはブラウザ内 (WASM) では実行できません (メモリ/ArrayBuffer 2GB の制限)。ローカルサーバーを使用してください`,
+      `${getModel(size).label} モデルはブラウザ内 (WASM) では実行できません (メモリ/ArrayBuffer 2GB の制限)。macOS アプリを使用してください`,
     );
   }
   const f = getModelFile(size, s.quant);
@@ -223,17 +234,111 @@ async function wasmPrepare(s: Settings): Promise<void> {
   });
 }
 
+// ---------------------------------------------------------------- app / server status
+
+const EVER_KEY = 'appEverConnected';
+
+async function everConnected(): Promise<boolean> {
+  return !!(await chrome.storage.local.get(EVER_KEY))[EVER_KEY];
+}
+
+function healthToStatus(s: Settings, h: HealthResult, ever: boolean): EngineStatus {
+  const backend = s.backend === 'server' ? 'server' : 'app';
+  const endpoint = endpointOf(s);
+  const state: EngineStatus['state'] =
+    h.state === 'ok'
+      ? 'ready'
+      : h.state === 'loading'
+        ? 'loading'
+        : h.state === 'no_model'
+          ? 'no_model'
+          : h.state === 'unreachable'
+            ? 'not_running'
+            : 'error';
+  const modelLabel =
+    backend === 'app' ? modelLabelOf(h.model) || undefined : `${getModel(s.modelSize).label} (${endpoint})`;
+  return { backend, state, message: h.message, modelLabel, endpoint, everConnected: ever, appVersion: h.version };
+}
+
+async function httpStatus(s: Settings, timeoutMs = 2500): Promise<EngineStatus> {
+  const kind = s.backend === 'server' ? 'server' : 'app';
+  const h = await checkHealth(kind, endpointOf(s), timeoutMs);
+  let ever = kind === 'app' ? await everConnected() : true;
+  if (kind === 'app' && !ever && (h.state === 'ok' || h.state === 'loading' || h.state === 'no_model')) {
+    ever = true;
+    await chrome.storage.local.set({ [EVER_KEY]: true });
+  }
+  return healthToStatus(s, h, ever);
+}
+
+function broadcastStatus(status: EngineStatus): void {
+  chrome.runtime.sendMessage({ type: 'engine-status', status } satisfies RuntimeMessage).catch(() => {});
+}
+
+/** アクティブなタブで plamotranslate://open を開く (外部プロトコルなのでページ自体は遷移しない)。タブが無ければ新規タブ */
+async function openAppUrl(): Promise<void> {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (tab?.id !== undefined) await chrome.tabs.update(tab.id, { url: APP_LAUNCH_URL });
+  else await chrome.tabs.create({ url: APP_LAUNCH_URL });
+}
+
+const LAUNCH_POLL_MS = 15000;
+let launching: Promise<EngineStatus> | null = null;
+
+/** macOS アプリを起動し、/health を最大 15 秒ポーリングする。途中経過は engine-status で通知 */
+function launchApp(): Promise<EngineStatus> {
+  if (launching) return launching;
+  launching = (async () => {
+    await openAppUrl();
+    const deadline = Date.now() + LAUNCH_POLL_MS;
+    let st: EngineStatus;
+    for (;;) {
+      const s = await loadSettings();
+      st = await httpStatus({ ...s, backend: 'app' }, 1500);
+      if (st.state !== 'not_running') break;
+      if (Date.now() >= deadline) break;
+      broadcastStatus({ ...st, launching: true, message: 'macOS アプリの起動を待っています…' });
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (st.state === 'not_running') {
+      st = {
+        ...st,
+        message:
+          'macOS アプリを起動できませんでした。「PLaMo Translate」がインストールされているか確認し、手動で起動してください',
+      };
+    }
+    broadcastStatus(st);
+    return st;
+  })().finally(() => {
+    launching = null;
+  });
+  return launching;
+}
+
+async function appModels(): Promise<AppModelsResult> {
+  const s = await loadSettings();
+  try {
+    return { ok: true, models: await listAppModels(s.appEndpoint) };
+  } catch (e) {
+    return { ok: false, models: [], message: (e as Error).message };
+  }
+}
+
+async function appSelect(id: string): Promise<AppSelectResult> {
+  const s = await loadSettings();
+  try {
+    const h = await selectAppModel(s.appEndpoint, id);
+    const status = healthToStatus({ ...s, backend: 'app' }, h, true);
+    broadcastStatus(status);
+    return { ok: true, message: h.message, status };
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
+  }
+}
+
 async function getStatus(): Promise<EngineStatus> {
   const s = await loadSettings();
-  if (s.backend === 'server') {
-    const h = await checkHealth(s.endpoint, 2500);
-    return {
-      backend: 'server',
-      state: h.ok ? 'ready' : 'error',
-      message: h.message,
-      modelLabel: `${getModel(s.modelSize).label} (${s.endpoint})`,
-    };
-  }
+  if (s.backend === 'app' || s.backend === 'server') return httpStatus(s);
   let label = '';
   try {
     label = modelSpec(s).label;
@@ -290,8 +395,8 @@ chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse
     case 'prepare':
       loadSettings()
         .then(async (s) => {
-          if (s.backend === 'server') {
-            const h = await checkHealth(s.endpoint);
+          if (s.backend === 'app' || s.backend === 'server') {
+            const h = await checkHealth(s.backend, endpointOf(s));
             return { ok: h.ok, message: h.message };
           }
           await wasmPrepare(s);
@@ -301,8 +406,23 @@ chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse
       return true;
     case 'testConnection':
       loadSettings()
-        .then((s) => checkHealth(msg.endpoint ?? s.endpoint))
+        .then(async (s) => {
+          const backend = msg.backend === 'server' ? 'server' : msg.backend === 'app' ? 'app' : s.backend;
+          const kind = backend === 'server' ? 'server' : 'app';
+          const endpoint = msg.endpoint ?? (kind === 'app' ? s.appEndpoint : s.endpoint);
+          const st = await httpStatus({ ...s, backend: kind, [kind === 'app' ? 'appEndpoint' : 'endpoint']: endpoint }, 4000);
+          return { ok: st.state === 'ready', message: st.message, status: st };
+        })
         .then(sendResponse);
+      return true;
+    case 'launchApp':
+      launchApp().then(sendResponse);
+      return true;
+    case 'appModels':
+      appModels().then(sendResponse);
+      return true;
+    case 'appSelectModel':
+      appSelect(msg.id).then(sendResponse);
       return true;
     case 'openOptions':
       chrome.runtime.openOptionsPage();
@@ -317,7 +437,13 @@ chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse
 const MENU_SELECTION = 'plamo-translate-selection';
 const MENU_PAGE = 'plamo-translate-page';
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((details) => {
+  // 旧バージョンからの更新時は設定をマイグレーション (loadSettings が変換・保存する)
+  void loadSettings();
+  if (details.reason === 'install') {
+    // 初回: 「はじめに」(macOS アプリのセットアップ手順と接続テスト) を開く
+    void chrome.tabs.create({ url: chrome.runtime.getURL('options.html#welcome') });
+  }
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({ id: MENU_SELECTION, title: 'PLaMoで翻訳', contexts: ['selection'] });
     chrome.contextMenus.create({ id: MENU_PAGE, title: 'このページをPLaMoで翻訳', contexts: ['page'] });

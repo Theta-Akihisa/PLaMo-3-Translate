@@ -10,7 +10,11 @@ export interface TranslateRequest {
   history?: HistoryItem[];
 }
 
-export type EngineState = 'idle' | 'downloading' | 'loading' | 'ready' | 'error';
+/**
+ * - `not_running`: macOS アプリ / サーバーに接続できない (接続拒否)
+ * - `no_model`: macOS アプリで選択中のモデルが未ダウンロード
+ */
+export type EngineState = 'idle' | 'downloading' | 'loading' | 'ready' | 'error' | 'not_running' | 'no_model';
 
 export interface EngineStatus {
   backend: BackendId;
@@ -18,11 +22,44 @@ export interface EngineStatus {
   /** ダウンロード進捗 */
   loaded?: number;
   total?: number;
+  /** 例: "0.8B Q4_K_M" */
   modelLabel?: string;
   message?: string;
   /** wasm のみ: マルチスレッドかどうか */
   threads?: number;
   crossOriginIsolated?: boolean;
+  /** app / server: 接続先 */
+  endpoint?: string;
+  /** app のみ: 一度でも接続できたことがあるか (未接続ならセットアップ手順へ誘導) */
+  everConnected?: boolean;
+  /** app のみ: 「アプリを起動」後、起動待ち中 */
+  launching?: boolean;
+  /** app のみ: アプリのバージョン */
+  appVersion?: string;
+}
+
+/** macOS アプリ GET /v1/models の 1 エントリ (shared/local-api.md) */
+export interface AppModel {
+  id: string;
+  size: string;
+  label: string;
+  installed: boolean;
+  active: boolean;
+  quant?: string;
+  installedQuants?: string[];
+  sizeBytes?: number;
+}
+
+export interface AppModelsResult {
+  ok: boolean;
+  models: AppModel[];
+  message?: string;
+}
+
+export interface AppSelectResult {
+  ok: boolean;
+  message: string;
+  status?: EngineStatus;
 }
 
 /** 'translate' ポート: クライアント → Service Worker */
@@ -64,7 +101,11 @@ export type OffscreenToSw =
 export type RuntimeMessage =
   | { type: 'getStatus' }
   | { type: 'prepare' }
-  | { type: 'testConnection'; endpoint?: string }
+  | { type: 'testConnection'; endpoint?: string; backend?: BackendId }
+  /** macOS アプリを URL スキームで起動し、/health をポーリングする (応答は最終 EngineStatus) */
+  | { type: 'launchApp' }
+  | { type: 'appModels' }
+  | { type: 'appSelectModel'; id: string }
   | { type: 'openOptions' }
   | { type: 'engine-status'; status: EngineStatus }
   | { type: 'page-state'; state: PageState }

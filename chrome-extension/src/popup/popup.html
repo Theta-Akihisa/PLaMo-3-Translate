@@ -55,6 +55,15 @@
   <span class="dot"></span>
   <span id="statusText">確認中…</span>
 </div>
+<div id="modelRow" class="model-row" hidden>
+  <label for="appModel">モデル</label>
+  <select id="appModel" class="mini" title="macOS アプリで使うモデル (アプリの選択と同期)"></select>
+</div>
+<div id="statusHint" class="status-hint" hidden></div>
+<div id="statusActions" class="status-actions" hidden>
+  <button id="launchApp" class="small primary">アプリを起動</button>
+  <a id="setupLink" href="options.html#welcome" hidden>セットアップ方法</a>
+</div>
 <div id="progressWrap" class="progress" hidden><div id="progressBar"></div></div>
 
 <script type="module" src="popup.js"></script>

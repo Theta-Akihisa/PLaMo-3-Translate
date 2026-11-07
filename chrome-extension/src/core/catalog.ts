@@ -33,7 +33,7 @@ export const TARGET_LANGUAGES: Language[] = [...LANGUAGES, ...EXTRA_TARGETS];
 export const STOP: string[] = modelsJson.generation.stop;
 
 export type SizeId = ModelEntry['size'];
-/** ブラウザ内 (WASM) で動かせるサイズ。8B はメモリ/ArrayBuffer(2GB) 制限のためローカルサーバー専用。 */
+/** ブラウザ内 (WASM) で動かせるサイズ。8B はメモリ/ArrayBuffer(2GB) 制限のため macOS アプリ / llama-server 専用。 */
 export const WASM_SIZES: SizeId[] = ['0.8b', '2b'];
 
 export function getModel(size: SizeId): ModelEntry {

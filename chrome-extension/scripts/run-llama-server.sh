@@ -2,7 +2,7 @@
 # PLaMo 3 Translate (GGUF) を Hugging Face から取得し、llama-server (llama.cpp) で起動する。
 # 使い方: ./run-llama-server.sh [0.8b|2b|8b] [量子化 (既定 Q4_K_M)]
 #   環境変数: PORT (既定 8080), MODEL_DIR (既定 ~/.cache/plamo-3-translate), LLAMA_SERVER (llama-server のパス)
-# 拡張機能の設定: バックエンド「ローカルサーバー」 / エンドポイント http://127.0.0.1:8080
+# 拡張機能の設定: 翻訳エンジン「llama-server」 / エンドポイント http://127.0.0.1:8080
 set -euo pipefail
 
 SIZE="${1:-0.8b}"

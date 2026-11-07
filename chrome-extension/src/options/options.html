@@ -11,38 +11,80 @@
   <h1><span class="logo">P</span> PLaMo 3 Translate 設定</h1>
   <p class="lead">すべてローカルで翻訳します。変更は自動で保存されます。<span id="saved" class="saved"></span></p>
 
-  <section class="card">
-    <h2>バックエンド</h2>
-    <label class="choice"><input type="radio" name="backend" value="server">
-      <span><b>ローカルサーバー</b> <small>(推奨)</small><br>
-      llama-server または macOS アプリの API サーバーに接続します。0.8B / 2B / 8B すべて利用可能で、速度も最速です。</span></label>
-    <label class="choice"><input type="radio" name="backend" value="wasm">
-      <span><b>ブラウザ内 (WASM)</b> <span class="tag warn">実験的</span><br>
-      wllama (llama.cpp の WebAssembly 版) をブラウザ内で実行します。サーバー不要ですが遅く、0.8B / 2B のみ。
-      <span id="wasmNote" class="note"></span></span></label>
+  <details id="welcome" class="card welcome">
+    <summary>はじめに — macOS アプリと接続する</summary>
+    <p class="hint">この拡張機能は、Mac で動く「PLaMo Translate」アプリを翻訳エンジンとして使います。翻訳はすべてお使いの Mac の中で行われます。</p>
+    <ol class="steps">
+      <li id="step1" data-step="pending"><span class="mark" aria-hidden="true"></span><div>
+        <b>macOS アプリをインストールして起動</b><br>
+        <span class="hint">「PLaMo Translate」アプリをインストールして起動します（<a href="https://github.com/Theta-Akihisa/PLaMo-3-Translate/blob/main/apple/README.md" target="_blank" rel="noreferrer">インストール方法</a>）。アプリの API サーバーは既定で有効で、<code>127.0.0.1:18080</code> で待ち受けます。</span>
+        <div class="row"><button id="welcomeLaunch">アプリを起動</button></div></div></li>
+      <li id="step2" data-step="pending"><span class="mark" aria-hidden="true"></span><div>
+        <b>アプリでモデル（0.8B）をダウンロード</b><br>
+        <span class="hint">アプリの「モデル」画面で 0.8B（約 573 MB）をダウンロードします。より高精度な 2B / 8B は後から追加できます。</span></div></li>
+      <li id="step3" data-step="pending"><span class="mark" aria-hidden="true"></span><div>
+        <b>接続テスト</b><br>
+        <div class="row"><button id="welcomeTest">接続テスト</button><span id="welcomeResult" class="result inline"></span></div></div></li>
+    </ol>
+    <div id="welcomeStatus" class="live" data-state="idle"><span class="dot"></span><span id="welcomeStatusText">確認中…</span></div>
+  </details>
 
+  <section class="card">
+    <h2>翻訳エンジン</h2>
+    <label class="choice"><input type="radio" name="backend" value="app">
+      <span><b>macOS アプリ</b> <span class="tag ok">推奨・既定</span><br>
+      Mac の「PLaMo Translate」アプリを翻訳エンジンとして使います。モデルの管理はアプリで行い、0.8B / 2B / 8B を高速に実行します。</span></label>
+    <div id="appBox" class="sub">
+      <div id="appStatus" class="live" data-state="idle"><span class="dot"></span><span id="appStatusText">確認中…</span>
+        <button id="appLaunch" class="primary" hidden>アプリを起動</button></div>
+      <div id="appStatusHint" class="hint"></div>
+      <div class="row"><label for="appEndpoint">エンドポイント</label>
+        <input id="appEndpoint" type="url" placeholder="http://127.0.0.1:18080">
+        <button id="appTestConn">接続テスト</button></div>
+      <div id="appConnResult" class="result"></div>
+      <p class="hint">既定はポート <code>18080</code>。アプリの設定でポートを変えた場合はここも合わせてください。</p>
+    </div>
+
+    <label class="choice"><input type="radio" name="backend" value="server">
+      <span><b>llama-server</b> <span class="tag">上級者向け</span><br>
+      llama.cpp の <code>llama-server</code> に直接接続します（Windows / Linux でも利用可）。サーバーの起動とモデルの用意はご自身で行います。</span></label>
     <div id="serverBox" class="sub">
       <div class="row"><label for="endpoint">エンドポイント</label>
         <input id="endpoint" type="url" placeholder="http://127.0.0.1:8080">
         <button id="testConn">接続テスト</button></div>
       <div id="connResult" class="result"></div>
-      <p class="hint">起動例: <code>scripts/run-llama-server.sh 0.8b</code> (Windows: <code>scripts\run-llama-server.ps1</code>)。macOS アプリの内蔵 API サーバーも同じ <code>8080</code> ポートで使えます。</p>
+      <p class="hint">起動例: <code>scripts/run-llama-server.sh 0.8b</code> (Windows: <code>scripts\run-llama-server.ps1</code>)。既定ポートは <code>8080</code>。</p>
     </div>
 
-    <div id="wasmBox" class="sub">
-      <div class="row"><button id="prepare">モデルをダウンロード / 読み込み</button><span id="prepResult" class="result inline"></span></div>
-      <div id="prepProgress" class="progress" hidden><div></div></div>
-      <h3>ダウンロード済みモデル (キャッシュ)</h3>
-      <div id="cacheList" class="cache"></div>
-      <div class="row"><button id="refreshCache">更新</button><button id="clearCache" class="danger">キャッシュをすべて削除</button></div>
-    </div>
+    <details id="advBackend" class="adv">
+      <summary>詳細設定（実験的なエンジン）</summary>
+      <label class="choice"><input type="radio" name="backend" value="wasm">
+        <span><b>ブラウザ内 (WASM)</b> <span class="tag warn">実験的・現在 PLaMo 3 は未対応</span><br>
+        wllama (llama.cpp の WebAssembly 版) をブラウザ内で実行します。アプリ不要ですが遅く、0.8B / 2B のみ。
+        <span id="wasmNote" class="note"></span></span></label>
+      <div id="wasmBox" class="sub">
+        <div class="row"><button id="prepare">モデルをダウンロード / 読み込み</button><span id="prepResult" class="result inline"></span></div>
+        <div id="prepProgress" class="progress" hidden><div></div></div>
+        <h3>ダウンロード済みモデル (キャッシュ)</h3>
+        <div id="cacheList" class="cache"></div>
+        <div class="row"><button id="refreshCache">更新</button><button id="clearCache" class="danger">キャッシュをすべて削除</button></div>
+      </div>
+    </details>
   </section>
 
   <section class="card">
     <h2>モデル</h2>
-    <div class="row"><label for="modelSize">サイズ</label><select id="modelSize"></select></div>
-    <p id="sizeNote" class="hint"></p>
-    <div class="row"><label for="quant">量子化</label><select id="quant"></select></div>
+    <div id="appModelsBox">
+      <p class="hint">macOS アプリで使うモデルを選びます。アプリ側で切り替えた場合はアプリの選択が優先されます。未ダウンロードのモデルはアプリの「モデル」画面でダウンロードしてください。</p>
+      <div id="appModelList" class="models"><div class="empty">macOS アプリに接続するとモデルの一覧が表示されます</div></div>
+      <div id="appModelResult" class="result"></div>
+    </div>
+    <div id="localModelsBox">
+      <div class="row"><label for="modelSize">サイズ</label><select id="modelSize"></select></div>
+      <p id="sizeNote" class="hint"></p>
+      <div class="row"><label for="quant">量子化</label><select id="quant"></select></div>
+      <p id="serverSizeHint" class="hint">llama-server では、サーバーを起動したときのモデルが使われます（ここでの選択は表示と起動スクリプト引数の目安です）。</p>
+    </div>
     <p class="hint">PLaMo 3 Translate は <a href="https://plamo.preferredai.jp/info/plamo-community-license-ja" target="_blank" rel="noreferrer">PLaMo Community License</a> の下で提供されています。</p>
   </section>
 
@@ -70,7 +112,8 @@
   </section>
 
   <details class="card">
-    <summary>詳細設定 (上級者向け)</summary>
+    <summary>その他の設定 (WASM の詳細・初期化)</summary>
+    <p class="hint">ブラウザ内 (WASM・実験的) 用の設定と、設定の初期化です。</p>
     <div class="row col"><label for="modelUrlOverride">WASM 用モデル URL の上書き</label>
       <input id="modelUrlOverride" type="url" placeholder="空欄で Hugging Face の公式 GGUF を使用"></div>
     <div class="row"><label for="wasmThreads">WASM スレッド数 (0 = 自動)</label><input id="wasmThreads" type="number" min="0" max="32"></div>
@@ -78,7 +121,7 @@
   </details>
 
   <footer>
-    <p>プライバシー: 翻訳テキストは端末の外へ送信されません。通信が発生するのはモデルのダウンロード (Hugging Face) とローカルサーバー (127.0.0.1) への接続のみです。</p>
+    <p>プライバシー: 翻訳テキストは端末の外へ送信されません。通信が発生するのは macOS アプリ / llama-server (127.0.0.1) への接続と、WASM (実験的) 使用時のモデルのダウンロード (Hugging Face) のみです。</p>
   </footer>
 </main>
 <script type="module" src="options.js"></script>
