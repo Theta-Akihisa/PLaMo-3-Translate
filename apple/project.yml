@@ -91,6 +91,11 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSApplicationCategoryType: public.app-category.productivity
+        # plamotranslate://open — Chrome 拡張機能の「アプリを起動」ボタンから開く（shared/local-api.md）
+        CFBundleURLTypes:
+          - CFBundleURLName: jp.example.plamotranslate
+            CFBundleURLSchemes:
+              - plamotranslate
         NSServices:
           - NSMenuItem:
               default: PLaMoで翻訳
