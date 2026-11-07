@@ -21,8 +21,10 @@ struct HTTPResponse {
         case 200: return "OK"
         case 204: return "No Content"
         case 400: return "Bad Request"
+        case 403: return "Forbidden"
         case 404: return "Not Found"
         case 405: return "Method Not Allowed"
+        case 409: return "Conflict"
         case 411: return "Length Required"
         case 413: return "Payload Too Large"
         case 431: return "Request Header Fields Too Large"
@@ -82,38 +84,38 @@ struct HTTPRequestParser {
         let separator = Data([13, 10, 13, 10])
         guard let sepRange = buffer.range(of: separator) else {
             if buffer.count > Self.maxHeaderBytes {
-                return .failure(Self.error(431, "header too large"))
+                return .failure(Self.error(431, "リクエストヘッダが大きすぎます"))
             }
             return .needMore
         }
         let headerEnd = sepRange.lowerBound
         if headerEnd - buffer.startIndex > Self.maxHeaderBytes {
-            return .failure(Self.error(431, "header too large"))
+            return .failure(Self.error(431, "リクエストヘッダが大きすぎます"))
         }
         let headData = buffer[buffer.startIndex..<headerEnd]
         let head = String(data: headData, encoding: .utf8) ?? String(decoding: headData, as: UTF8.self)
         let lines = head.components(separatedBy: "\r\n")
-        guard let requestLine = lines.first else { return .failure(Self.error(400, "empty request")) }
+        guard let requestLine = lines.first else { return .failure(Self.error(400, "リクエストが空です")) }
         let parts = requestLine.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard parts.count == 3, parts[2].hasPrefix("HTTP/1.") else {
-            return .failure(Self.error(400, "malformed request line"))
+            return .failure(Self.error(400, "リクエスト行が不正です"))
         }
         var headers: [String: String] = [:]
         for line in lines.dropFirst() where !line.isEmpty {
             guard let colon = line.firstIndex(of: ":") else {
-                return .failure(Self.error(400, "malformed header"))
+                return .failure(Self.error(400, "リクエストヘッダが不正です"))
             }
             let key = line[line.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased()
             let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
             headers[key] = value
         }
         if let te = headers["transfer-encoding"], te.lowercased() != "identity" {
-            return .failure(Self.error(501, "Transfer-Encoding is not supported; send Content-Length"))
+            return .failure(Self.error(501, "Transfer-Encoding には対応していません。Content-Length を指定してください"))
         }
         var contentLength = 0
         if let cl = headers["content-length"] {
-            guard let n = Int(cl), n >= 0 else { return .failure(Self.error(400, "invalid Content-Length")) }
-            if n > Self.maxBodyBytes { return .failure(Self.error(413, "body exceeds 1 MB")) }
+            guard let n = Int(cl), n >= 0 else { return .failure(Self.error(400, "Content-Length が不正です")) }
+            if n > Self.maxBodyBytes { return .failure(Self.error(413, "リクエストボディが 1 MB を超えています")) }
             contentLength = n
         }
         let bodyStart = sepRange.upperBound

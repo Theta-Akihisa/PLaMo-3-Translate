@@ -5,6 +5,7 @@ import AppKit
 struct QuickTranslateView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @ObservedObject private var api = LocalAPIController.shared
     @State private var input = ""
     @State private var output = ""
     @State private var error: String?
@@ -57,6 +58,24 @@ struct QuickTranslateView: View {
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 Button("終了") { NSApplication.shared.terminate(nil) }
+            }
+            Divider()
+            // Chrome 拡張機能向けローカル API の状態
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(api.isRunning ? Color.green : (api.isFailed ? Color.red : Color.secondary))
+                    .frame(width: 7, height: 7)
+                Text("Chrome 拡張機能: \(api.shortStatusText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help(api.statusText)
+                Spacer()
+                if !api.isRunning {
+                    Button("API を開始") { api.ensureRunning() }
+                        .controlSize(.small)
+                }
+                SettingsLink { Text("設定…") }
+                    .controlSize(.small)
             }
         }
         .padding(14)

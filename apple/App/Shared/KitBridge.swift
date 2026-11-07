@@ -479,20 +479,58 @@ final class AppModel: ObservableObject {
     }
 }
 
-// MARK: - ローカル API 用バックエンド
+// MARK: - ローカル API 用バックエンド（shared/local-api.md）
 
 extension AppModel: APIBackend {
-    func apiHealth() -> APIHealth {
-        switch translator.state {
-        case .loading: return .loading
-        case .ready: return .ok
-        default: return isCurrentModelInstalled ? .ok : .noModel
-        }
+    /// API から見た「そのモデルを使うときの量子化ファイル」。
+    /// 選択中モデルは設定の量子化。それ以外はモデルカードで選んだ量子化（未選択なら既定）で、
+    /// それが未ダウンロードかつ別の量子化がダウンロード済みなら、そちらを使う。
+    private func apiFile(for spec: ModelSpec) -> ModelFile {
+        if spec.id == settings.modelID { return currentFile }
+        let chosen = selectedFile(for: spec)
+        if modelStore.isInstalled(chosen) { return chosen }
+        return spec.files.first { modelStore.isInstalled($0) } ?? chosen
     }
 
-    func apiStream(prompt: String, maxTokens: Int, stop: [String]) async throws -> AsyncThrowingStream<String, Error> {
+    private var isCurrentModelLoaded: Bool {
+        guard case .ready(let id) = translator.state, id == currentSpec.id else { return false }
+        return loadedKey == "\(currentSpec.id)|\(currentFile.quant)|\(settings.contextLength)"
+    }
+
+    func apiState() -> APIState {
+        let health: APIHealth
+        if !isCurrentModelInstalled {
+            health = .noModel
+        } else if case .loading = translator.state {
+            health = .loading
+        } else {
+            health = .ok   // 未ロードでも可（最初のリクエストで自動ロード）
+        }
+        let models = ModelCatalog.all.map { spec -> APIModelInfo in
+            let file = apiFile(for: spec)
+            return APIModelInfo(id: spec.id, size: spec.size, label: spec.label,
+                                quant: file.quant, sizeBytes: file.sizeBytes,
+                                installed: modelStore.isInstalled(file),
+                                installedQuants: spec.files.filter { modelStore.isInstalled($0) }.map(\.quant))
+        }
+        let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0.0"
+        return APIState(version: version, health: health, activeModelID: settings.modelID,
+                        loaded: isCurrentModelLoaded, models: models)
+    }
+
+    func apiSelectModel(id: String) throws {
+        guard let spec = ModelCatalog.spec(id: id) else { throw APIError.unknownModel(id) }
+        let file = apiFile(for: spec)
+        guard modelStore.isInstalled(file) else { throw APIError.modelNotInstalled(spec.label) }
+        activate(spec, file: file)   // settings に保存され、UI にも反映される
+    }
+
+    func apiStream(prompt: String, maxTokens: Int, stop: [String],
+                   switchTo: String?) async throws -> AsyncThrowingStream<String, Error> {
+        if let id = switchTo, id != settings.modelID { try apiSelectModel(id: id) }
+        guard isCurrentModelInstalled else { throw APIError.modelNotInstalled(currentSpec.label) }
         try await ensureLoaded()
         guard let engine = translator.engine else { throw AppError.engineUnavailable }
-        return await engine.complete(prompt: prompt, maxTokens: maxTokens, stop: stop)
+        return engine.complete(prompt: prompt, maxTokens: maxTokens, stop: stop)
     }
 }

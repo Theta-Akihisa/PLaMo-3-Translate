@@ -11,7 +11,7 @@ PFN の **PLaMo 3 Translate**（GGUF）を llama.cpp で端末上に読み込ん
 - **文体**（自動 / 常体 / 敬体。訳文が日本語のときのみ）と **用語集**（訳文ペインから開く。設定画面と同じデータ）
 - モデル管理（0.8B / 2B / 8B、量子化選択、ダウンロード/キャンセル/削除、メモリ警告）、初回オンボーディング、履歴（直近100件）、設定、About
 - iOS: App Intent「PLaMoで翻訳」（ショートカット）、URL スキーム `plamotranslate://translate?text=...&target=en&source=ja`
-- macOS: **⌘C を2回押して翻訳**（どのアプリでも）、メニューバーのクイック翻訳、Services メニュー「PLaMoで翻訳」、`.txt` / `.md` のドラッグ&ドロップ、ローカル API サーバ
+- macOS: **⌘C を2回押して翻訳**（どのアプリでも）、メニューバーのクイック翻訳、Services メニュー「PLaMoで翻訳」、`.txt` / `.md` のドラッグ&ドロップ、Chrome 拡張機能向けローカル API サーバ（既定で有効、`127.0.0.1:18080`）、URL スキーム `plamotranslate://open`
 
 ## 必要環境
 
@@ -57,35 +57,69 @@ open PlamoTranslate.xcodeproj
 
 キー入力の内容は保存・送信しません（⌘C の2回押しの検出にのみ使用）。設定でオフにできます。
 
-## macOS: ローカル API（llama-server 互換）
+## Chrome 拡張機能との連携（macOS）
 
-設定 > ローカルAPI で有効化（既定オフ、127.0.0.1:8080 のみ。ポート変更可）。
+Chrome 拡張機能（`chrome-extension/`）は、**この macOS アプリを翻訳エンジンとして呼び出す方式が既定**です。
+アプリは `127.0.0.1:18080` で llama-server 互換のローカル API を公開し、拡張機能はそこへ PFML3 プロンプトを送ります。
+仕様（エンドポイント・エラー形式・セキュリティ）は [`shared/local-api.md`](../shared/local-api.md) が正です。
+
+1. このアプリを起動し、「モデル」画面でモデル（0.8B / 2B / 8B）をダウンロードする
+2. Chrome 拡張機能をインストールする（既定のバックエンドは「macOS アプリ」、`http://127.0.0.1:18080`）
+3. 拡張機能のポップアップ / オプションに「接続済み」と表示されれば完了
+
+- **API サーバは既定で有効**（アプリ起動中は常に待ち受け）。設定 > Chrome 拡張機能 で状態の確認・オン/オフ・ポート変更・接続テスト用 curl のコピーができます。メニューバーのクイック翻訳にも状態を表示します
+- ウィンドウを閉じても**メニューバーに常駐**して待ち受けを続けます。設定 > Chrome 拡張機能 >「**ログイン時に起動**」をオンにすると、拡張機能からいつでも使えます（`SMAppService`）
+- アプリが起動していないと、拡張機能は「アプリを起動」ボタンで `plamotranslate://open` を開きます（アプリを前面に出し、API サーバを待ち受け状態にします。オフに設定されていた場合はオンに戻します）
+- 拡張機能でモデルサイズを切り替えると `POST /v1/models/select` でアプリの使用モデルも切り替わります（アプリの設定・UI にも反映）。未ダウンロードのモデルは選べないので、アプリでダウンロードしてください
+- 翻訳はアプリ内の同じエンジンで直列に実行されます。拡張機能側で中断（接続を閉じる）すると生成も止まります
+
+### セキュリティ
+
+- `127.0.0.1` のみにバインド（LAN からは接続不可）
+- `Host` ヘッダが `127.0.0.1` / `localhost`（`:<ポート>` 付きも可）以外なら `403 forbidden_host`（DNS リバインディング対策）
+- `Origin` ヘッダがある場合は `chrome-extension://` だけ許可し、一般の Web ページからは `403 forbidden_origin`。`Origin` が無いリクエスト（curl など）は許可
+- CORS は許可した Origin をそのまま返し（`*` は使わない）、`Vary: Origin`。プリフライトにも同じ判定を適用し、`Access-Control-Allow-Private-Network: true` を返します
+- ボディ上限 1 MB、`Transfer-Encoding: chunked` は非対応
+
+### curl で確認
 
 ```sh
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/v1/models
+curl http://127.0.0.1:18080/health
+# {"api":1,"app":"PLaMo Translate","model":{"id":"plamo-3-translate-0.8b","label":"0.8B","loaded":false,"quant":"Q4_K_M","size":"0.8b"},"status":"ok","version":"0.1.0"}
+# status: ok (200) / loading (503) / no_model (503: 選択中モデルが未ダウンロード)
 
-# 生の PFML3 プロンプトを補完（stream:true で SSE）
-curl http://127.0.0.1:8080/v1/completions -H 'Content-Type: application/json' -d '{
+curl http://127.0.0.1:18080/v1/models     # 別名 plamo-3-translate + 0.8B / 2B / 8B（installed / active / quant / installed_quants / size_bytes）
+
+# 使用モデルを切り替える（未ダウンロードなら 409 model_not_installed、未知の ID は 404）
+curl http://127.0.0.1:18080/v1/models/select -H 'Content-Type: application/json' -d '{"model":"plamo-3-translate-2b"}'
+
+# 生の PFML3 プロンプトを補完（stream:true で SSE）。model は省略可（plamo-3-translate = 選択中モデル）
+curl http://127.0.0.1:18080/v1/completions -H 'Content-Type: application/json' -d '{
+  "model": "plamo-3-translate",
   "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>Hello, world!<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja<|plamo:msg|>",
   "max_tokens": 256, "temperature": 0, "stream": false
 }'
 
 # 便利エンドポイント（PFML3 プロンプトはアプリ側で組み立て）
-curl http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl http://127.0.0.1:18080/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "messages": [{"role":"user","content":"Hello, world!"}],
   "chat_template_kwargs": {"target_lang":"ja","form":"polite","glossary":[{"source":"world","target":"世界"}]},
   "stream": false
 }'
+
+# Web ページからのアクセスは拒否される（403 forbidden_origin）
+curl -i http://127.0.0.1:18080/health -H 'Origin: https://example.com'
 ```
 
+- エラーは OpenAI 互換の `{"error":{"message":"…","type":"model_not_installed","code":409}}`（`type`: `forbidden_host` / `forbidden_origin` / `model_not_installed` / `invalid_request` / `not_found` / `server_error`）
+- `/v1/completions` の `model` に別のダウンロード済みモデル ID を指定すると、`/v1/models/select` と同様に切り替えてから実行します
 - 停止文字列は `<|plamo:tag|>` / `<|plamo:bos|>` が常に追加されます。温度は常に greedy（`temperature` は無視）
-- CORS（`Access-Control-Allow-Origin: *`）と OPTIONS プリフライトに対応。ボディ上限 1 MB、`Transfer-Encoding: chunked` は非対応
-- **Chrome 拡張機能**: オプションでエンドポイントを `http://127.0.0.1:8080` にし、本アプリでサーバを有効にしてモデルをダウンロードしておく（`/health` が 200 になれば接続済み）
+- `finish_reason` は現状常に `"stop"`（エンジンが `max_tokens` 到達を区別して返さないため）
+- 旧バージョンの既定ポート 8080 のままだった設定は、初回起動時に 18080 へ移行します（8080 は拡張機能の「llama-server」バックエンドの既定）
 
 ## テスト
 
-`PlamoTranslate-macOS` スキームで ⌘U（`App/Tests/APIRouterTests.swift`: HTTP パーサ / ルータ / レスポンス形式）。
+`PlamoTranslate-macOS` スキームで ⌘U（`App/Tests/APIRouterTests.swift`: HTTP パーサ / Host・Origin 検査 / プリフライト / `/health`・`/v1/models`・`/v1/models/select` / モデル指定 / エラー形式）。
 
 ## トラブルシューティング
 
@@ -93,7 +127,7 @@ curl http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/jso
 - **ダウンロードが進まない/失敗**: ネットワークとストレージ空き容量を確認。キャンセル後に再開すると続きから/最初からやり直します
 - **iOS で落ちる/すぐ終了する**: メモリ不足の可能性。0.8B か低ビットの量子化（Q3_K_M 等）、コンテキスト長 4096 を試す。バックグラウンド移行時は生成を中断します
 - **⌘C×2 が反応しない**: アクセシビリティ権限を確認（許可後は数秒かかります。再起動が必要な場合も）
-- **ローカル API が起動しない**: ポートの競合（`lsof -i :8080`）。1024〜65535 で指定
+- **ローカル API が起動しない / 拡張機能が接続できない**: 設定 > Chrome 拡張機能 の状態を確認。ポートの競合（`lsof -i :18080`）なら別のポート（1024〜65535）にして拡張機能のオプションも合わせる。`curl http://127.0.0.1:18080/health` で応答を確認
 - **シミュレータで動かない**: 仕様です（実機のみ）
 
 ## ライセンス・クレジット
