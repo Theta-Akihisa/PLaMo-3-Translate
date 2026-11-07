@@ -3,7 +3,8 @@ import {
   MODELS, LANGUAGES, TARGET_LANGUAGES, WASM_SIZES, getModel, formatBytes, type SizeId,
 } from '../core/catalog';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings } from '../core/settings';
-import type { EngineStatus, RuntimeMessage } from '../core/protocol';
+import type { AppModel, AppModelsResult, AppSelectResult, EngineStatus, RuntimeMessage } from '../core/protocol';
+import { statusSummary } from '../core/status-view';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 let s: Settings;
@@ -23,18 +24,23 @@ function fill(sel: HTMLSelectElement, items: { value: string; text: string }[]) 
 }
 
 function syncVisibility() {
+  $('appBox').hidden = s.backend !== 'app';
   $('serverBox').hidden = s.backend !== 'server';
   $('wasmBox').hidden = s.backend !== 'wasm';
+  if (s.backend === 'wasm') ($('advBackend') as HTMLDetailsElement).open = true;
+  $('appModelsBox').hidden = s.backend !== 'app';
+  $('localModelsBox').hidden = s.backend === 'app';
+  $('serverSizeHint').hidden = s.backend !== 'server';
   const note = $('wasmNote');
   note.textContent =
     '現在同梱の wllama 3.8.1 (llama.cpp) は PLaMo 3 のトークナイザに未対応のため、モデルの読み込みに失敗します。' +
-    'wllama が対応するまではローカルサーバーを使用してください。';
+    'wllama が対応するまでは macOS アプリを使用してください。';
   const m = getModel(s.modelSize);
   $('sizeNote').textContent =
     `${m.description} / 必要メモリの目安 ${m.minRamGB}GB 以上。` +
     (WASM_SIZES.includes(s.modelSize)
       ? ''
-      : ' 8B はブラウザ内 (WASM) では実行できません (WebAssembly のメモリ上限と ArrayBuffer 2GB 制限のため)。ローカルサーバー専用です。');
+      : ' 8B はブラウザ内 (WASM) では実行できません (WebAssembly のメモリ上限と ArrayBuffer 2GB 制限のため)。');
   const q = $<HTMLSelectElement>('quant');
   fill(q, m.files.map((f) => ({ value: f.quant, text: `${f.quant} (${formatBytes(f.sizeBytes)})` })));
   q.value = m.files.some((f) => f.quant === s.quant) ? s.quant : m.defaultQuant;
@@ -99,6 +105,136 @@ async function renderCache() {
   }
 }
 
+// ---------------------------------------------------------------- macOS アプリ (はじめに / 状態 / モデル)
+
+type TestResult = { ok: boolean; message: string; status?: EngineStatus };
+let appStatus: EngineStatus | null = null;
+let launching = false;
+
+function setStep(id: string, state: 'pending' | 'current' | 'done') {
+  $(id).dataset.step = state;
+}
+
+function renderApp(st: EngineStatus) {
+  appStatus = st;
+  const v = statusSummary(st);
+  for (const [box, text] of [
+    ['welcomeStatus', 'welcomeStatusText'],
+    ['appStatus', 'appStatusText'],
+  ] as const) {
+    $(box).dataset.state = st.state;
+    $(text).textContent = v.text;
+    $(text).title = [st.message, st.endpoint].filter(Boolean).join('\n');
+  }
+  $('appStatusHint').textContent = v.hint ?? '';
+  const launchBtn = $<HTMLButtonElement>('appLaunch');
+  launchBtn.hidden = !v.canLaunch;
+  for (const b of [launchBtn, $<HTMLButtonElement>('welcomeLaunch')]) {
+    b.disabled = !!st.launching;
+    b.textContent = st.launching ? '起動を待っています…' : 'アプリを起動';
+  }
+  $('welcomeLaunch').hidden = !v.canLaunch;
+  const reached = st.state === 'ready' || st.state === 'loading' || st.state === 'no_model';
+  setStep('step1', reached ? 'done' : 'current');
+  setStep('step2', st.state === 'ready' || st.state === 'loading' ? 'done' : reached ? 'current' : 'pending');
+  setStep('step3', st.state === 'ready' ? 'done' : st.state === 'loading' ? 'current' : 'pending');
+  if (reached) void loadAppModels();
+  else renderModels(null);
+}
+
+let modelsKey = '';
+function renderModels(models: AppModel[] | null, message?: string) {
+  const box = $('appModelList');
+  const key = JSON.stringify(models) + (message ?? '');
+  if (key === modelsKey) return;
+  modelsKey = key;
+  box.textContent = '';
+  if (!models || !models.length) {
+    const d = document.createElement('div');
+    d.className = 'empty';
+    d.textContent = message ?? 'macOS アプリに接続するとモデルの一覧が表示されます';
+    box.append(d);
+    return;
+  }
+  for (const m of models) {
+    const row = document.createElement('div');
+    row.className = 'm';
+    row.dataset.size = m.size;
+    row.dataset.installed = String(m.installed);
+    const label = document.createElement('label');
+    const r = document.createElement('input');
+    r.type = 'radio';
+    r.name = 'appModel';
+    r.value = m.id;
+    r.checked = m.active;
+    r.disabled = !m.installed;
+    r.addEventListener('change', () => r.checked && void selectAppModel(m.id));
+    const name = document.createElement('b');
+    name.textContent = m.label;
+    const cat = MODELS.find((x) => x.size === m.size);
+    const info = document.createElement('small');
+    info.textContent = [m.quant, m.sizeBytes ? formatBytes(m.sizeBytes) : '', cat ? `${cat.description}` : '']
+      .filter(Boolean)
+      .join(' · ');
+    label.append(r, name, info);
+    const badge = document.createElement('span');
+    badge.className = 'badge' + (m.active ? ' active' : '');
+    badge.textContent = m.active ? (m.installed ? '使用中' : '選択中 (未ダウンロード)') : m.installed ? 'ダウンロード済み' : '未ダウンロード';
+    row.append(label, badge);
+    if (!m.installed) {
+      const dl = document.createElement('button');
+      dl.className = 'download';
+      dl.textContent = 'アプリでダウンロード';
+      dl.title = 'macOS アプリを開きます。「モデル」画面でダウンロードしてください';
+      dl.addEventListener('click', () => void launchApp());
+      row.append(dl);
+    }
+    box.append(row);
+  }
+}
+
+async function loadAppModels() {
+  const r = (await chrome.runtime.sendMessage({ type: 'appModels' } satisfies RuntimeMessage)) as AppModelsResult;
+  renderModels(r.ok ? r.models : null, r.ok ? undefined : r.message);
+}
+
+let selectMsgTimer: ReturnType<typeof setTimeout> | undefined;
+async function selectAppModel(id: string) {
+  const out = $('appModelResult');
+  out.className = 'result';
+  out.textContent = 'モデルを切り替え中…';
+  const r = (await chrome.runtime.sendMessage({ type: 'appSelectModel', id } satisfies RuntimeMessage)) as AppSelectResult;
+  out.className = `result ${r.ok ? 'ok' : 'err'}`;
+  out.textContent = r.ok ? `切り替えました（${r.status?.modelLabel ?? id}）` : r.message;
+  clearTimeout(selectMsgTimer);
+  selectMsgTimer = setTimeout(() => (out.textContent = ''), 4000);
+  modelsKey = '';
+  if (r.status) renderApp(r.status);
+  else void pollApp();
+}
+
+async function testApp(endpoint?: string): Promise<TestResult> {
+  return (await chrome.runtime.sendMessage({ type: 'testConnection', backend: 'app', endpoint } satisfies RuntimeMessage)) as TestResult;
+}
+
+async function pollApp() {
+  if (launching) return;
+  const r = await testApp();
+  if (r.status && !launching) renderApp(r.status);
+}
+
+async function launchApp() {
+  launching = true;
+  if (appStatus) renderApp({ ...appStatus, launching: true });
+  try {
+    const st = (await chrome.runtime.sendMessage({ type: 'launchApp' } satisfies RuntimeMessage)) as EngineStatus;
+    launching = false;
+    renderApp(st);
+  } finally {
+    launching = false;
+  }
+}
+
 async function init() {
   s = await loadSettings();
   fill($('modelSize') as HTMLSelectElement, MODELS.map((m) => ({ value: m.size, text: `${m.label}${m.default ? ' (既定)' : ''}` })));
@@ -120,6 +256,8 @@ async function init() {
     void save({ quant: m.defaultQuant });
   });
   bind('endpoint', 'endpoint', (v) => v.trim());
+  bind('appEndpoint', 'appEndpoint', (v) => v.trim());
+  $('appEndpoint').addEventListener('change', () => void pollApp());
   bind('targetLang', 'targetLang', (v) => v);
   bind('sourceLang', 'sourceLang', (v) => v);
   bind('form', 'form', (v) => v as Settings['form']);
@@ -145,12 +283,25 @@ async function init() {
     out.className = 'result';
     out.textContent = '接続中…';
     const ep = ($('endpoint') as HTMLInputElement).value;
-    const r = (await chrome.runtime.sendMessage({ type: 'testConnection', endpoint: ep } satisfies RuntimeMessage)) as {
-      ok: boolean;
-      message: string;
-    };
+    const r = (await chrome.runtime.sendMessage({ type: 'testConnection', backend: 'server', endpoint: ep } satisfies RuntimeMessage)) as TestResult;
     out.className = `result ${r.ok ? 'ok' : 'err'}`;
     out.textContent = r.message;
+  });
+  const appTest = async (outId: string) => {
+    const out = $(outId);
+    out.className = out.className.includes('inline') ? 'result inline' : 'result';
+    out.textContent = '接続中…';
+    const r = await testApp(($('appEndpoint') as HTMLInputElement).value);
+    out.className = `${out.className} ${r.ok ? 'ok' : 'err'}`;
+    out.textContent = r.message;
+    if (r.status) renderApp(r.status);
+  };
+  $('appTestConn').addEventListener('click', () => void appTest('appConnResult'));
+  $('welcomeTest').addEventListener('click', () => void appTest('welcomeResult'));
+  $('appLaunch').addEventListener('click', () => void launchApp());
+  $('welcomeLaunch').addEventListener('click', () => void launchApp());
+  chrome.runtime.onMessage.addListener((m: RuntimeMessage) => {
+    if (m.type === 'engine-status' && m.status.backend === 'app') renderApp(m.status);
   });
 
   $('prepare').addEventListener('click', async () => {
@@ -189,6 +340,20 @@ async function init() {
   syncVisibility();
   renderGlossary();
   void renderCache();
+
+  // はじめに: 初回インストール時 (#welcome) と、まだ一度も macOS アプリに接続できていないときは開いておく
+  const welcome = $('welcome') as HTMLDetailsElement;
+  const first = location.hash === '#welcome';
+  const ever = !!(await chrome.storage.local.get('appEverConnected')).appEverConnected;
+  welcome.open = first || !ever;
+  if (first) {
+    welcome.classList.add('first');
+    welcome.scrollIntoView();
+  }
+  await pollApp();
+  setInterval(() => {
+    if (document.visibilityState === 'visible') void pollApp();
+  }, 3000);
 }
 
 void init();

@@ -8,7 +8,7 @@ export function friendlyLoadError(raw: string): string {
     return (
       `同梱の wllama 3.8.1 (llama.cpp ${Wllama.getLibllamaVersion?.() ?? ''}) は ` +
       'PLaMo 3 のトークナイザに未対応のため、モデルを読み込めません。' +
-      '設定でバックエンドを「ローカルサーバー」に切り替えてください。' +
+      '設定で翻訳エンジンを「macOS アプリ」(推奨) に切り替えてください。' +
       ` (詳細: ${raw.split('\n')[0].slice(0, 160)})`
     );
   }

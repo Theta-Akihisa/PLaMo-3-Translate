@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import http from 'node:http';
 import { startMock } from './mock-server.mjs';
 
 const require = createRequire(import.meta.url);
@@ -57,9 +58,22 @@ console.log('extension id', extId);
 const setSettings = async (patch) => {
   await sw.evaluate(async (p) => {
     const cur = (await chrome.storage.local.get('settings')).settings ?? {};
-    await chrome.storage.local.set({ settings: { ...cur, ...p } });
+    await chrome.storage.local.set({ settings: { ...cur, version: 2, ...p } });
   }, patch);
 };
+const getStored = () => sw.evaluate(async () => (await chrome.storage.local.get(null)));
+const freePort = () => new Promise((r) => { const s = http.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+const rawHttp = (opts, body) => new Promise((resolve, reject) => {
+  const req = http.request({ host: '127.0.0.1', port: mock.port, ...opts }, (res) => {
+    let b = '';
+    res.on('data', (c) => (b += c));
+    res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b }));
+  });
+  req.on('error', reject);
+  if (body) req.write(body);
+  req.end();
+});
+const statusText = (p) => p.textContent('#statusText');
 const openPopup = async () => {
   const p = await ctx.newPage();
   await p.setViewportSize({ width: 380, height: 600 });
@@ -67,7 +81,191 @@ const openPopup = async () => {
   return p;
 };
 
-// ------------------------------------------------------------------ (a) ローカルサーバー (mock)
+// ------------------------------------------------------------------ (0) 初回起動 / macOS アプリ (mock)
+await test('first run: welcome (はじめに) opens on install; defaults = macOS app @ 18080', async () => {
+  const isWelcome = (pg) => pg.url().endsWith('/options.html#welcome');
+  let welcome = ctx.pages().find(isWelcome);
+  if (!welcome) welcome = await ctx.waitForEvent('page', { predicate: isWelcome, timeout: 10000 });
+  await welcome.waitForLoadState();
+  await welcome.waitForFunction(() => document.getElementById('welcome').open && document.getElementById('welcomeStatus').dataset.state !== 'idle', null, { timeout: 10000 });
+  const txt = await welcome.textContent('#welcome');
+  for (const t of ['macOS アプリをインストールして起動', 'アプリでモデル（0.8B）をダウンロード', '接続テスト']) assert(txt.includes(t), 'step: ' + t);
+  const st = await welcome.textContent('#welcomeStatusText');
+  eq(await welcome.locator('input[name="backend"][value="app"]').isChecked(), true, 'app backend checked by default');
+  eq(await welcome.inputValue('#appEndpoint'), 'http://127.0.0.1:18080', 'default app endpoint');
+  eq(await welcome.locator('input[name="backend"][value="wasm"]').isVisible(), false, 'wasm hidden under 詳細設定');
+  await welcome.setViewportSize({ width: 900, height: 900 });
+  await welcome.screenshot({ path: path.join(SHOTS, 'options-welcome.png') });
+  await welcome.close();
+  return `welcome status: ${st}`;
+});
+
+await test('migration: v1 default (server @ 8080) -> app; customized endpoint kept on server', async () => {
+  await sw.evaluate(async () => chrome.storage.local.set({ settings: { backend: 'server', endpoint: 'http://127.0.0.1:8080', targetLang: 'en', modelSize: '2b' } }));
+  let p = await openPopup();
+  await p.waitForFunction(() => document.getElementById('statusText').textContent !== '確認中…');
+  let st = (await getStored()).settings;
+  eq(st.backend, 'app'); eq(st.version, 2); eq(st.appEndpoint, 'http://127.0.0.1:18080'); eq(st.targetLang, 'en', 'other settings kept');
+  await p.close();
+  await sw.evaluate(async () => chrome.storage.local.set({ settings: { backend: 'server', endpoint: 'http://192.168.0.10:9000' } }));
+  p = await openPopup();
+  await p.waitForFunction(() => document.getElementById('statusText').textContent !== '確認中…');
+  st = (await getStored()).settings;
+  eq(st.backend, 'server'); eq(st.endpoint, 'http://192.168.0.10:9000');
+  await p.close();
+  await sw.evaluate(async () => chrome.storage.local.remove('settings'));
+});
+
+await test('app: not running -> 「アプリを起動」 opens plamotranslate://open, polls /health, connects when app starts', async () => {
+  const port = await freePort();
+  await setSettings({ backend: 'app', appEndpoint: `http://127.0.0.1:${port}`, targetLang: 'ja', sourceLang: 'auto', form: 'none', liveTranslate: true });
+  await sw.evaluate(() => {
+    globalThis.__opened = [];
+    globalThis.__origTabs = { update: chrome.tabs.update, create: chrome.tabs.create };
+    chrome.tabs.update = async (...a) => { globalThis.__opened.push({ fn: 'update', url: (typeof a[0] === 'object' ? a[0] : a[1])?.url }); return {}; };
+    chrome.tabs.create = async (props) => { globalThis.__opened.push({ fn: 'create', url: props?.url }); return {}; };
+  });
+  const p = await openPopup();
+  let appMock;
+  try {
+    await p.waitForFunction(() => document.getElementById('statusText').textContent.includes('macOS アプリが起動していません'), null, { timeout: 8000 });
+    eq(await p.locator('#launchApp').isVisible(), true, 'launch button visible');
+    eq(await p.textContent('#launchApp'), 'アプリを起動');
+    eq(await p.locator('#setupLink').isVisible(), true, 'setup link (never connected)');
+    await p.screenshot({ path: path.join(SHOTS, 'popup-not-running.png') });
+    await p.click('#launchApp');
+    let opened = [];
+    for (let i = 0; i < 50 && !opened.length; i++) { await sleep(100); opened = await sw.evaluate(() => globalThis.__opened); }
+    eq(opened.length, 1, 'one open attempt');
+    eq(opened[0].url, 'plamotranslate://open', 'launch URL');
+    await p.waitForFunction(() => /起動を待っています/.test(document.body.textContent), null, { timeout: 3000 });
+    await sleep(1500);
+    appMock = await startMock({ port }); // 「アプリが起動した」
+    await p.waitForFunction(() => document.getElementById('statusText').textContent.includes('macOS アプリ · 0.8B Q4_K_M'), null, { timeout: 15000 });
+    eq(await p.locator('#launchApp').isVisible(), false, 'launch button hidden after connect');
+    eq((await getStored()).appEverConnected, true, 'everConnected recorded');
+    return `opened via tabs.${opened[0].fn}(${opened[0].url})`;
+  } finally {
+    await sw.evaluate(() => { chrome.tabs.update = globalThis.__origTabs.update; chrome.tabs.create = globalThis.__origTabs.create; });
+    await p.close();
+    await appMock?.close();
+  }
+});
+
+await test('app: connected -> status shows model; translation via /v1/completions with extension Origin', async () => {
+  mock.reset();
+  await setSettings({ backend: 'app', appEndpoint: base });
+  const p = await openPopup();
+  await p.waitForFunction(() => document.getElementById('statusText').textContent === 'macOS アプリ · 0.8B Q4_K_M — 接続済み', null, { timeout: 8000 });
+  await p.waitForFunction(() => !document.getElementById('modelRow').hidden && document.getElementById('appModel').options.length === 3);
+  const opts = await p.$$eval('#appModel option', (os) => os.map((o) => ({ v: o.value, t: o.textContent, d: o.disabled })));
+  eq(JSON.stringify(opts.map((o) => o.t)), JSON.stringify(['0.8B', '2B', '8B（アプリでダウンロード）']));
+  eq(opts[2].d, true, '8B disabled'); eq(opts[1].d, false, '2B enabled');
+  eq(await p.inputValue('#appModel'), 'plamo-3-translate-0.8b');
+  await p.selectOption('#sourceLang', 'auto');
+  mock.requests.length = 0;
+  await p.fill('#input', 'The meeting has been rescheduled to next Monday.');
+  await p.waitForFunction(() => document.getElementById('output').textContent.includes('会議は来週の月曜日に変更されました。'), null, { timeout: 15000 });
+  const r = mock.requests.at(-1);
+  eq(r.model, 'plamo-3-translate'); eq(r.stream, true); eq(r.temperature, 0);
+  eq(r.prompt, prompt('basic_en_to_ja'), 'PFML3 prompt');
+  eq(r.origin, `chrome-extension://${extId}`, 'Origin header');
+  await p.waitForFunction(() => /秒/.test(document.getElementById('meta').textContent));
+  await p.screenshot({ path: path.join(SHOTS, 'popup.png') });
+  await p.close();
+});
+
+await test('app: model switch via POST /v1/models/select; app-side choice is the truth; options list', async () => {
+  mock.reset();
+  const p = await openPopup();
+  await p.waitForFunction(() => document.getElementById('appModel').options.length === 3, null, { timeout: 8000 });
+  mock.apiLog.length = 0;
+  await p.selectOption('#appModel', 'plamo-3-translate-2b');
+  await p.waitForFunction(() => document.getElementById('statusText').textContent.includes('macOS アプリ · 2B Q4_K_M'), null, { timeout: 8000 });
+  eq(mock.app.active, '2b', 'app switched');
+  assert(mock.apiLog.some((e) => e.method === 'POST' && e.path === '/v1/models/select' && e.status === 200), 'select called');
+  // 未ダウンロードのモデルは 409 (UI では選べないが、API 経由でも拒否される)
+  const r409 = await p.evaluate(() => chrome.runtime.sendMessage({ type: 'appSelectModel', id: 'plamo-3-translate-8b' }));
+  eq(r409.ok, false); assert(/ダウンロード/.test(r409.message), '409 message: ' + r409.message);
+  await p.close();
+  // アプリの UI で 0.8B に戻された -> 拡張機能はそれに従う
+  mock.app.active = '0.8b';
+  const p2 = await openPopup();
+  await p2.waitForFunction(() => document.getElementById('statusText').textContent.includes('0.8B Q4_K_M') && document.getElementById('appModel').value === 'plamo-3-translate-0.8b', null, { timeout: 8000 });
+  await p2.close();
+  // 設定画面のモデル一覧
+  const o = await ctx.newPage();
+  await o.goto(`chrome-extension://${extId}/options.html`);
+  await o.waitForFunction(() => document.querySelectorAll('#appModelList .m').length === 3, null, { timeout: 8000 });
+  eq(await o.locator('#appModelList .m[data-size="8b"] input').isDisabled(), true, '8B radio disabled');
+  eq(await o.locator('#appModelList .m[data-size="8b"] button').textContent(), 'アプリでダウンロード');
+  eq(await o.locator('#appModelList .m[data-size="0.8b"] input').isChecked(), true);
+  eq(await o.locator('#localModelsBox').isVisible(), false, 'size/quant selector hidden for app');
+  await o.locator('#appModelList .m[data-size="2b"] input').check();
+  await o.waitForFunction(() => document.getElementById('appModelResult').textContent.includes('切り替えました'), null, { timeout: 8000 });
+  eq(mock.app.active, '2b');
+  await o.waitForFunction(() => document.getElementById('appStatusText').textContent.includes('2B Q4_K_M'));
+  mock.app.active = '0.8b';
+  await o.waitForFunction(() => document.getElementById('appStatusText').textContent.includes('0.8B Q4_K_M') && document.querySelector('#appModelList .m[data-size="0.8b"] input').checked, null, { timeout: 8000 });
+  await o.screenshot({ path: path.join(SHOTS, 'options.png'), fullPage: true });
+  await o.close();
+});
+
+await test('app: no_model / loading states; 409 model_not_installed message on translate', async () => {
+  mock.reset();
+  mock.app.installed = new Set(['2b']); // 選択中の 0.8B が未ダウンロード
+  const p = await openPopup();
+  await p.waitForFunction(() => document.getElementById('statusText').textContent.includes('モデル未ダウンロード'), null, { timeout: 8000 });
+  eq((await p.textContent('#statusHint')).trim(), 'macOS アプリの『モデル』画面でダウンロードしてください');
+  await p.selectOption('#sourceLang', 'en');
+  await p.fill('#input', 'Hello there.');
+  await p.waitForFunction(() => document.getElementById('output').classList.contains('err'), null, { timeout: 10000 });
+  const out = await p.textContent('#output');
+  assert(out.includes('ダウンロードされていません'), '409 server message shown: ' + out);
+  await p.screenshot({ path: path.join(SHOTS, 'popup-no-model.png') });
+  await p.close();
+  mock.reset();
+  mock.app.loading = true;
+  const p2 = await openPopup();
+  await p2.waitForFunction(() => document.getElementById('statusText').textContent.includes('読み込み中'), null, { timeout: 8000 });
+  mock.app.loading = false;
+  await p2.waitForFunction(() => document.getElementById('statusText').textContent.includes('接続済み'), null, { timeout: 8000 }); // 3 秒ごとの再確認
+  await p2.close();
+});
+
+await test('mock: origin/host enforcement (web page rejected, extension allowed), CORS preflight', async () => {
+  mock.apiLog.length = 0;
+  const page = await ctx.newPage();
+  await page.goto(`http://localhost:${mock.port}/page.html`);
+  const cross = await page.evaluate(async (u) => { try { await fetch(u); return 'allowed'; } catch (e) { return 'rejected'; } }, `${base}/health`);
+  eq(cross, 'rejected', 'cross-origin web page fetch');
+  const same = await page.evaluate(async () => { const r = await fetch('/v1/completions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"prompt":"x"}' }); return { s: r.status, j: await r.json() }; });
+  eq(same.s, 403); eq(same.j.error.type, 'forbidden_origin');
+  await page.close();
+  assert(mock.apiLog.some((e) => e.origin === `http://localhost:${mock.port}` && e.status === 403), 'web origin got 403');
+  const h = await rawHttp({ path: '/health', headers: { Host: `evil.example:${mock.port}` } });
+  eq(h.status, 403); eq(JSON.parse(h.body).error.type, 'forbidden_host');
+  const ev = await rawHttp({ path: '/health', headers: { Origin: 'https://evil.example' } });
+  eq(ev.status, 403); eq(JSON.parse(ev.body).error.type, 'forbidden_origin');
+  const pre = await rawHttp({ method: 'OPTIONS', path: '/v1/completions', headers: { Origin: 'chrome-extension://abc', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Private-Network': 'true' } });
+  eq(pre.status, 204); eq(pre.headers['access-control-allow-origin'], 'chrome-extension://abc'); eq(pre.headers['access-control-allow-private-network'], 'true');
+  const noOrigin = await rawHttp({ path: '/health' });
+  eq(noOrigin.status, 200, 'no Origin (curl) allowed');
+  // 拡張機能から届いたリクエストの Origin は常に chrome-extension://<id> (または無し)
+  mock.apiLog.length = 0;
+  const p = await openPopup();
+  await p.waitForFunction(() => document.getElementById('statusText').textContent.includes('接続済み'), null, { timeout: 8000 });
+  await p.waitForFunction(() => document.getElementById('appModel').options.length === 3);
+  await p.close();
+  const fromExt = mock.apiLog.filter((e) => e.path === '/health' || e.path === '/v1/models');
+  assert(fromExt.length >= 2, 'ext requests logged');
+  for (const e of fromExt) assert(e.origin === null || e.origin === `chrome-extension://${extId}`, 'ext origin: ' + e.origin);
+  eq(fromExt.every((e) => e.status === 200), true, 'ext requests accepted');
+  return `ext GET origins: ${[...new Set(fromExt.map((e) => e.origin ?? '(none)'))].join(', ')}`;
+});
+
+// ------------------------------------------------------------------ (a) llama-server (mock)
+mock.reset();
 await setSettings({ backend: 'server', endpoint: base, targetLang: 'ja', sourceLang: 'auto', form: 'none', liveTranslate: true });
 
 await test('server: popup live translation streams + exact PFML3 prompt (explicit source)', async () => {
@@ -100,7 +298,7 @@ await test('server: 言語を検出 (auto) -> 「英語（検出）」 and promp
   // CLD が「信頼できない」と判断した短文では翻訳元を渡さない (= 公式ベクタ basic_en_to_ja と完全一致)
   eq(pr, prompt('basic_en_to_ja'), 'prompt (unreliable detection -> no source)');
   await p.waitForFunction(() => /秒/.test(document.getElementById('meta').textContent));
-  await p.screenshot({ path: path.join(SHOTS, 'popup.png') });
+  await p.screenshot({ path: path.join(SHOTS, 'popup-server.png') });
   await p.close();
 });
 
@@ -162,7 +360,7 @@ await test('server: connection test (options) ok / ng', async () => {
   await p.waitForFunction(() => document.getElementById('connResult').classList.contains('err'), null, { timeout: 8000 });
   await p.fill('#endpoint', base);
   await p.dispatchEvent('#endpoint', 'change');
-  await p.screenshot({ path: path.join(SHOTS, 'options.png'), fullPage: true });
+  await p.screenshot({ path: path.join(SHOTS, 'options-server.png'), fullPage: true });
   await p.close();
 });
 
@@ -315,7 +513,7 @@ if (modelFiles['/plamo.gguf'] && !process.env.E2E_SKIP_PLAMO) {
 
 if (process.env.E2E_DEBUG) console.log('requests', mock.requests.length);
 await ctx.close();
-mock.close();
+await mock.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
 fs.writeFileSync(path.join(SCRATCH, 'e2e-results.json'), JSON.stringify(results, null, 2));

@@ -2,7 +2,8 @@ import { TARGET_LANGUAGES, LANGUAGES, formatBytes } from '../core/catalog';
 import { loadSettings, saveSettings, type Settings } from '../core/settings';
 import { translateStream, getEngineStatus, TranslateCancelled, type TranslateHandle } from '../core/client';
 import { detectLanguage, smartTarget, langJa } from '../core/detect';
-import type { EngineStatus, PageState, RuntimeMessage } from '../core/protocol';
+import type { AppModelsResult, AppSelectResult, EngineStatus, PageState, RuntimeMessage } from '../core/protocol';
+import { statusSummary } from '../core/status-view';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const sourceSel = $<HTMLSelectElement>('sourceLang');
@@ -18,6 +19,12 @@ const clearBtn = $<HTMLButtonElement>('clear');
 const formRow = $('formRow');
 const statusRow = $('statusRow');
 const statusText = $('statusText');
+const statusHint = $('statusHint');
+const statusActions = $('statusActions');
+const launchBtn = $<HTMLButtonElement>('launchApp');
+const setupLink = $<HTMLAnchorElement>('setupLink');
+const appModelSel = $<HTMLSelectElement>('appModel');
+const modelRow = $('modelRow');
 const progressWrap = $('progressWrap');
 const progressBar = $('progressBar');
 const pageBtn = $<HTMLButtonElement>('pageTranslate');
@@ -49,11 +56,13 @@ function setOutput(text: string, kind: 'empty' | 'ok' | 'err' = 'ok') {
   copyBtn.disabled = kind !== 'ok' || !text;
 }
 
+let lastStatus: EngineStatus | null = null;
+
 function renderStatus(st: EngineStatus) {
+  lastStatus = st;
   statusRow.dataset.state = st.state;
-  const backend = st.backend === 'wasm' ? 'ブラウザ内 (WASM)' : 'ローカルサーバー';
-  let text = `${backend}`;
-  if (st.modelLabel) text += ` · ${st.modelLabel}`;
+  const v = statusSummary(st);
+  let text = v.text;
   if (st.state === 'downloading' && st.total) {
     const pct = Math.floor(((st.loaded ?? 0) / st.total) * 100);
     text += ` — ダウンロード中 ${pct}% (${formatBytes(st.loaded ?? 0)} / ${formatBytes(st.total)})`;
@@ -61,12 +70,40 @@ function renderStatus(st: EngineStatus) {
     progressBar.style.width = `${pct}%`;
   } else {
     progressWrap.hidden = true;
-    if (st.state === 'loading') text += ' — モデルを読み込み中…';
-    else if (st.state === 'ready') text += ' — 準備完了';
-    else if (st.message) text += ` — ${st.message}`;
   }
   statusText.textContent = text;
-  statusText.title = st.message ?? '';
+  statusText.title = [st.message, st.endpoint].filter(Boolean).join('\n');
+  statusHint.textContent = v.hint ?? '';
+  statusHint.hidden = !v.hint;
+  statusActions.hidden = !v.canLaunch && !v.showSetup;
+  launchBtn.hidden = !v.canLaunch;
+  launchBtn.disabled = !!st.launching;
+  launchBtn.textContent = st.launching ? '起動を待っています…' : 'アプリを起動';
+  setupLink.hidden = !v.showSetup;
+  const reachable = st.backend === 'app' && (st.state === 'ready' || st.state === 'loading' || st.state === 'no_model');
+  if (reachable) void loadAppModels();
+  else modelRow.hidden = true;
+}
+
+let modelsSeq = 0;
+async function loadAppModels() {
+  const seq = ++modelsSeq;
+  const r = (await chrome.runtime.sendMessage({ type: 'appModels' } satisfies RuntimeMessage)) as AppModelsResult;
+  if (seq !== modelsSeq) return;
+  if (!r?.ok || !r.models.length) {
+    modelRow.hidden = true;
+    return;
+  }
+  appModelSel.textContent = '';
+  for (const m of r.models) {
+    const o = new Option(m.installed ? m.label : `${m.label}（アプリでダウンロード）`, m.id, false, m.active);
+    o.disabled = !m.installed;
+    o.dataset.size = m.size;
+    appModelSel.add(o);
+  }
+  const active = r.models.find((m) => m.active);
+  if (active) appModelSel.value = active.id;
+  modelRow.hidden = false;
 }
 
 async function refreshStatus() {
@@ -296,6 +333,31 @@ async function init() {
     }
   });
   pageRestoreBtn.addEventListener('click', async () => renderPage(await sendPage('restore')));
+
+  launchBtn.addEventListener('click', async () => {
+    if (lastStatus) renderStatus({ ...lastStatus, launching: true, message: 'macOS アプリの起動を待っています…' });
+    const st = (await chrome.runtime.sendMessage({ type: 'launchApp' } satisfies RuntimeMessage)) as EngineStatus;
+    if (settings.backend === 'app') renderStatus(st);
+  });
+  setupLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    void chrome.tabs.create({ url: chrome.runtime.getURL('options.html#welcome') });
+    window.close();
+  });
+  appModelSel.addEventListener('change', async () => {
+    appModelSel.disabled = true;
+    meta.textContent = 'モデルを切り替え中…';
+    const r = (await chrome.runtime.sendMessage({ type: 'appSelectModel', id: appModelSel.value } satisfies RuntimeMessage)) as AppSelectResult;
+    appModelSel.disabled = false;
+    meta.textContent = r.ok ? '' : r.message;
+    if (r.status) renderStatus(r.status);
+    else void refreshStatus();
+  });
+  // アプリ未起動・読み込み中などの間は定期的に状態を確認 (手動でアプリを起動した場合にも追従)
+  setInterval(() => {
+    if (!lastStatus || lastStatus.launching || lastStatus.backend === 'wasm') return;
+    if (lastStatus.state !== 'ready') void refreshStatus();
+  }, 3000);
   chrome.runtime.onMessage.addListener((msg: RuntimeMessage) => {
     if (msg.type === 'engine-status' && msg.status.backend === settings.backend) renderStatus(msg.status);
     else if (msg.type === 'page-state') renderPage(msg.state);
