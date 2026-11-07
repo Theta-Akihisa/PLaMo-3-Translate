@@ -8,6 +8,7 @@ PFML3 プロンプトを **アプリ側で直接組み立てて** 補完（compl
 | `models.json` | モデルカタログ（0.8B 既定 / 2B / 8B、量子化ごとの URL・サイズ・SHA-256） |
 | `languages.json` | 対応 53 言語と言語コード（`<|plamo:key|>lang<|plamo:val|>` に入れる値） |
 | `pfml3-test-vectors.json` | 公式チャットテンプレートから生成した PFML3 プロンプトの正解例。各実装のユニットテストで完全一致を確認する |
+| `local-api.md` | macOS アプリが公開するローカル API の仕様（Chrome 拡張機能から呼び出す） |
 | `chat_template.reference.jinja` | `pfnet/plamo-3-translate-0.8b-GGUF` 同梱の公式テンプレート（原本のコピー） |
 
 テストベクタの再生成: `python3 tools/gen_pfml3_vectors.py`（要 `jinja2`）
