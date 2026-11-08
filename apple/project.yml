@@ -1,0 +1,148 @@
+# XcodeGen spec — `xcodegen generate` で PlamoTranslate.xcodeproj を生成する
+name: PlamoTranslate
+options:
+  bundleIdPrefix: jp.example   # プレースホルダ。自分のものに変更すること
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""      # 自分の Team ID を入れる（または Xcode の Signing で選択）
+    PRODUCT_MODULE_NAME: PlamoTranslateApp
+    PRODUCT_NAME: PlamoTranslate
+packages:
+  PlamoTranslateKit:
+    path: PlamoTranslateKit
+targets:
+  PlamoTranslate-iOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: App/Shared
+      - path: App/iOS
+    dependencies:
+      - package: PlamoTranslateKit
+        product: PlamoTranslateCore
+      - package: PlamoTranslateKit
+        product: PlamoTranslateKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: jp.example.plamotranslate
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SDKROOT: iphoneos
+        SUPPORTED_PLATFORMS: "iphoneos"     # llama.xcframework に Simulator スライスが無いため実機のみ
+    info:
+      path: Config/iOS-Info.plist
+      properties:
+        CFBundleDisplayName: PLaMo Translate
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+        CFBundleURLTypes:
+          - CFBundleURLName: jp.example.plamotranslate
+            CFBundleURLSchemes:
+              - plamotranslate
+    entitlements:
+      path: Config/iOS.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
+
+  PlamoTranslate-macOS:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: App/Shared
+      - path: App/macOS
+    dependencies:
+      - package: PlamoTranslateKit
+        product: PlamoTranslateCore
+      - package: PlamoTranslateKit
+        product: PlamoTranslateKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: jp.example.plamotranslate
+        ENABLE_HARDENED_RUNTIME: YES
+        COMBINE_HIDPI_IMAGES: YES
+    info:
+      path: Config/macOS-Info.plist
+      properties:
+        CFBundleDisplayName: PLaMo Translate
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSApplicationCategoryType: public.app-category.productivity
+        # plamotranslate://open — Chrome 拡張機能の「アプリを起動」ボタンから開く（shared/local-api.md）
+        CFBundleURLTypes:
+          - CFBundleURLName: jp.example.plamotranslate
+            CFBundleURLSchemes:
+              - plamotranslate
+        NSServices:
+          - NSMenuItem:
+              default: PLaMoで翻訳
+            NSMessage: translateSelection
+            NSPortName: PlamoTranslate
+            NSSendTypes:
+              - NSStringPboardType
+    # App Sandbox は使わない（グローバルな ⌘C×2 監視に Accessibility 権限が必要なため）。
+    # Hardened Runtime は有効。Mac App Store ではなく Developer ID 配布向け。
+    entitlements:
+      path: Config/macOS.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+
+  PlamoTranslate-macOSTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: App/Tests
+    dependencies:
+      - target: PlamoTranslate-macOS
+      - package: PlamoTranslateKit
+        product: PlamoTranslateCore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_NAME: PlamoTranslateTests
+        PRODUCT_MODULE_NAME: PlamoTranslateTests
+        PRODUCT_BUNDLE_IDENTIFIER: jp.example.plamotranslate.tests
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/PlamoTranslate.app/Contents/MacOS/PlamoTranslate
+        BUNDLE_LOADER: $(TEST_HOST)
+
+schemes:
+  PlamoTranslate-iOS:
+    build:
+      targets:
+        PlamoTranslate-iOS: all
+    run:
+      config: Debug
+  PlamoTranslate-macOS:
+    build:
+      targets:
+        PlamoTranslate-macOS: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - PlamoTranslate-macOSTests

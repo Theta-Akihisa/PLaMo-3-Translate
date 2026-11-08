@@ -1,0 +1,277 @@
+{
+  "description": "53 languages supported by PLaMo 3 Translate (codes are the exact values for <|plamo:key|>lang). 'ja(easy)' is accepted as a target (やさしい日本語) by the official template.",
+  "languages": [
+    {
+      "code": "ja",
+      "ja": "日本語",
+      "en": "Japanese"
+    },
+    {
+      "code": "en",
+      "ja": "英語",
+      "en": "English"
+    },
+    {
+      "code": "zh-hans",
+      "ja": "中国語（簡体字）",
+      "en": "Chinese (Simplified)"
+    },
+    {
+      "code": "zh-hant",
+      "ja": "中国語（繁体字）",
+      "en": "Chinese (Traditional)"
+    },
+    {
+      "code": "ko",
+      "ja": "韓国語",
+      "en": "Korean"
+    },
+    {
+      "code": "ar",
+      "ja": "アラビア語",
+      "en": "Arabic"
+    },
+    {
+      "code": "az",
+      "ja": "アゼルバイジャン語",
+      "en": "Azerbaijani"
+    },
+    {
+      "code": "be",
+      "ja": "ベラルーシ語",
+      "en": "Belarusian"
+    },
+    {
+      "code": "bg",
+      "ja": "ブルガリア語",
+      "en": "Bulgarian"
+    },
+    {
+      "code": "bn",
+      "ja": "ベンガル語",
+      "en": "Bengali"
+    },
+    {
+      "code": "ca",
+      "ja": "カタルーニャ語",
+      "en": "Catalan"
+    },
+    {
+      "code": "ceb",
+      "ja": "セブアノ語",
+      "en": "Cebuano"
+    },
+    {
+      "code": "de",
+      "ja": "ドイツ語",
+      "en": "German"
+    },
+    {
+      "code": "es",
+      "ja": "スペイン語",
+      "en": "Spanish"
+    },
+    {
+      "code": "et",
+      "ja": "エストニア語",
+      "en": "Estonian"
+    },
+    {
+      "code": "eu",
+      "ja": "バスク語",
+      "en": "Basque"
+    },
+    {
+      "code": "fa",
+      "ja": "ペルシャ語",
+      "en": "Persian"
+    },
+    {
+      "code": "fr",
+      "ja": "フランス語",
+      "en": "French"
+    },
+    {
+      "code": "gu",
+      "ja": "グジャラート語",
+      "en": "Gujarati"
+    },
+    {
+      "code": "he",
+      "ja": "ヘブライ語",
+      "en": "Hebrew"
+    },
+    {
+      "code": "hi",
+      "ja": "ヒンディー語",
+      "en": "Hindi"
+    },
+    {
+      "code": "hr",
+      "ja": "クロアチア語",
+      "en": "Croatian"
+    },
+    {
+      "code": "hu",
+      "ja": "ハンガリー語",
+      "en": "Hungarian"
+    },
+    {
+      "code": "hy",
+      "ja": "アルメニア語",
+      "en": "Armenian"
+    },
+    {
+      "code": "id",
+      "ja": "インドネシア語",
+      "en": "Indonesian"
+    },
+    {
+      "code": "it",
+      "ja": "イタリア語",
+      "en": "Italian"
+    },
+    {
+      "code": "jv",
+      "ja": "ジャワ語",
+      "en": "Javanese"
+    },
+    {
+      "code": "ka",
+      "ja": "ジョージア語",
+      "en": "Georgian"
+    },
+    {
+      "code": "kk",
+      "ja": "カザフ語",
+      "en": "Kazakh"
+    },
+    {
+      "code": "km",
+      "ja": "クメール語",
+      "en": "Khmer"
+    },
+    {
+      "code": "lt",
+      "ja": "リトアニア語",
+      "en": "Lithuanian"
+    },
+    {
+      "code": "lv",
+      "ja": "ラトビア語",
+      "en": "Latvian"
+    },
+    {
+      "code": "ml",
+      "ja": "マラヤーラム語",
+      "en": "Malayalam"
+    },
+    {
+      "code": "mr",
+      "ja": "マラーティー語",
+      "en": "Marathi"
+    },
+    {
+      "code": "ms",
+      "ja": "マレー語",
+      "en": "Malay"
+    },
+    {
+      "code": "my",
+      "ja": "ミャンマー語",
+      "en": "Burmese"
+    },
+    {
+      "code": "ne",
+      "ja": "ネパール語",
+      "en": "Nepali"
+    },
+    {
+      "code": "nl",
+      "ja": "オランダ語",
+      "en": "Dutch"
+    },
+    {
+      "code": "pa",
+      "ja": "パンジャーブ語",
+      "en": "Punjabi"
+    },
+    {
+      "code": "pl",
+      "ja": "ポーランド語",
+      "en": "Polish"
+    },
+    {
+      "code": "ru",
+      "ja": "ロシア語",
+      "en": "Russian"
+    },
+    {
+      "code": "si",
+      "ja": "シンハラ語",
+      "en": "Sinhala"
+    },
+    {
+      "code": "sk",
+      "ja": "スロバキア語",
+      "en": "Slovak"
+    },
+    {
+      "code": "sl",
+      "ja": "スロベニア語",
+      "en": "Slovenian"
+    },
+    {
+      "code": "sr",
+      "ja": "セルビア語",
+      "en": "Serbian"
+    },
+    {
+      "code": "sw",
+      "ja": "スワヒリ語",
+      "en": "Swahili"
+    },
+    {
+      "code": "ta",
+      "ja": "タミル語",
+      "en": "Tamil"
+    },
+    {
+      "code": "te",
+      "ja": "テルグ語",
+      "en": "Telugu"
+    },
+    {
+      "code": "th",
+      "ja": "タイ語",
+      "en": "Thai"
+    },
+    {
+      "code": "tl",
+      "ja": "タガログ語",
+      "en": "Tagalog"
+    },
+    {
+      "code": "ur",
+      "ja": "ウルドゥー語",
+      "en": "Urdu"
+    },
+    {
+      "code": "uz",
+      "ja": "ウズベク語",
+      "en": "Uzbek"
+    },
+    {
+      "code": "vi",
+      "ja": "ベトナム語",
+      "en": "Vietnamese"
+    }
+  ],
+  "extraTargets": [
+    {
+      "code": "ja(easy)",
+      "ja": "やさしい日本語",
+      "en": "Easy Japanese"
+    }
+  ]
+}
