@@ -6,7 +6,7 @@ import PlamoTranslateCore
 public enum ModelStoreError: LocalizedError {
     case insufficientDiskSpace(required: Int64, available: Int64)
     case checksumMismatch(String)
-    case sizeMismatch
+    case sizeMismatch(expected: Int64, actual: Int64)
     case httpStatus(Int)
     case invalidGGUF
     case alreadyDownloading
@@ -17,7 +17,8 @@ public enum ModelStoreError: LocalizedError {
         case .insufficientDiskSpace(let r, let a):
             return "空き容量が不足しています（必要 \(f.string(fromByteCount: r))、空き \(f.string(fromByteCount: a))）。"
         case .checksumMismatch(let n): return "\(n) のチェックサムが一致しません。ダウンロードをやり直してください。"
-        case .sizeMismatch: return "ダウンロードしたファイルのサイズが想定と異なります。"
+        case .sizeMismatch(let e, let a):
+            return "ダウンロードしたファイルのサイズが想定と異なります（想定 \(e) バイト、実際 \(a) バイト）。配布元のファイルが更新された可能性があります。アプリを最新版にしてください。"
         case .httpStatus(let c): return "ダウンロードに失敗しました（HTTP \(c)）。"
         case .invalidGGUF: return "GGUF ファイルではありません。"
         case .alreadyDownloading: return "すでにダウンロード中です。"
@@ -124,9 +125,10 @@ public final class ModelStore: ObservableObject {
             let expectedSize = file.sizeBytes, expectedHash = file.sha256
             try await Task.detached(priority: .utility) {
                 let attrs = try FileManager.default.attributesOfItem(atPath: tmp.path)
-                guard (attrs[.size] as? NSNumber)?.int64Value == expectedSize else {
+                let actualSize = (attrs[.size] as? NSNumber)?.int64Value ?? -1
+                guard actualSize == expectedSize else {
                     try? FileManager.default.removeItem(at: tmp)
-                    throw ModelStoreError.sizeMismatch
+                    throw ModelStoreError.sizeMismatch(expected: expectedSize, actual: actualSize)
                 }
                 let hash = try Self.sha256Hex(of: tmp)
                 guard hash.caseInsensitiveCompare(expectedHash) == .orderedSame else {

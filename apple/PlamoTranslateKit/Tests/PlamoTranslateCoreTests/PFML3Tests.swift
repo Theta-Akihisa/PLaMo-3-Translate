@@ -56,7 +56,7 @@ final class PFML3Tests: XCTestCase {
     }
 
     func testLanguageValidation() {
-        for ok in ["ja", "en", "zh-hans", "zh-hant", "fil", "ja(easy)"] { XCTAssertTrue(PFML3.isValidLangCode(ok), ok) }
+        for ok in ["ja", "en", "zh-hans", "zh-hant", "fil", "ja-easy", "ja(easy)"] { XCTAssertTrue(PFML3.isValidLangCode(ok), ok) }
         for bad in ["", "J", "EN", "english", "en-US", "zh-han", "zh-hans-x", "en_us", "e1", "ja(easy"] {
             XCTAssertFalse(PFML3.isValidLangCode(bad), bad)
         }
@@ -135,7 +135,9 @@ final class CatalogTests: XCTestCase {
         XCTAssertEqual(LanguageCatalog.all.count, 53)
         XCTAssertEqual(LanguageCatalog.targets.count, 54)
         XCTAssertEqual(LanguageCatalog.name(for: "en"), "英語")
+        XCTAssertEqual(LanguageCatalog.name(for: "ja-easy"), "やさしい日本語")
         XCTAssertEqual(LanguageCatalog.name(for: "ja(easy)"), "やさしい日本語")
+        XCTAssertEqual(PFML3.normalizeLang("ja(easy)"), "ja-easy")
         XCTAssertEqual(LanguageCatalog.name(for: "zz"), "zz")
         for l in LanguageCatalog.targets { XCTAssertTrue(PFML3.isValidLangCode(l.code), l.code) }
     }
@@ -150,5 +152,14 @@ final class CatalogTests: XCTestCase {
         XCTAssertNil(s.makeRequest(text: "x").form)
         let data = try? JSONEncoder().encode(s)
         XCTAssertEqual(try? JSONDecoder().decode(TranslationSettings.self, from: data ?? Data()), s)
+    }
+
+    func testCatalogURLsArePinnedToRevision() {
+        // main を指すと配布元の更新でサイズ・SHA-256 がずれるため、必ずリビジョン固定 URL を使う
+        for m in ModelCatalog.all {
+            for f in m.files {
+                XCTAssertFalse(f.url.absoluteString.contains("/resolve/main/"), f.url.absoluteString)
+            }
+        }
     }
 }

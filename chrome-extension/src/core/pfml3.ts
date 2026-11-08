@@ -46,6 +46,11 @@ function checkText(value: unknown, name: string, allowEmpty = false): asserts va
   }
 }
 
+/** やさしい日本語の旧表記 ja(easy) を PFML3 の ja-easy に正規化する（公式テンプレート 2026-11-07 版と同じ）。 */
+export function normalizeLang(value: string): string {
+  return value === 'ja(easy)' ? 'ja-easy' : value;
+}
+
 export function isValidLangCode(value: string): boolean {
   if (value === 'ja(easy)') return true;
   const parts = value.split('-');
@@ -59,15 +64,15 @@ function checkLang(value: unknown, name: string): asserts value is string {
   checkText(value, name);
   if (!isValidLangCode(value)) {
     throw new Pfml3Error(
-      `${name} は小文字の言語コード (en, ja, zh-hans, ja(easy) など) で指定してください: ${value}`,
+      `${name} は小文字の言語コード (en, ja, zh-hans, ja-easy など) で指定してください: ${value}`,
     );
   }
 }
 
 /** PFML3 プロンプト文字列を組み立てる。 */
 export function buildPrompt(req: Pfml3Request): string {
-  const targetLang = req.targetLang ?? 'ja';
-  const sourceLang = req.sourceLang ?? null;
+  const targetLang = normalizeLang(req.targetLang ?? 'ja');
+  const sourceLang = req.sourceLang != null ? normalizeLang(req.sourceLang) : null;
   const form = req.form ?? null;
   const context = req.context ?? null;
   const glossary = req.glossary ?? null;

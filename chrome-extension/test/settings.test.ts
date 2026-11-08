@@ -87,3 +87,11 @@ describe('health (shared/local-api.md)', () => {
     );
   });
 });
+
+describe('easy Japanese code migration', () => {
+  it('migrates stored ja(easy) to ja-easy', () => {
+    const { settings, changed } = migrateSettings({ version: SETTINGS_VERSION, backend: 'app', targetLang: 'ja(easy)' });
+    expect(settings.targetLang).toBe('ja-easy');
+    expect(changed).toBe(true);
+  });
+});
