@@ -1,5 +1,5 @@
 {
-  "description": "53 languages supported by PLaMo 3 Translate (codes are the exact values for <|plamo:key|>lang). 'ja(easy)' is accepted as a target (やさしい日本語) by the official template.",
+  "description": "53 languages supported by PLaMo 3 Translate (codes are the exact values for <|plamo:key|>lang). 'ja-easy' (やさしい日本語) is accepted as a target; the official template also accepts the older alias 'ja(easy)' and renders it as 'ja-easy'.",
   "languages": [
     {
       "code": "ja",
@@ -269,7 +269,7 @@
   ],
   "extraTargets": [
     {
-      "code": "ja(easy)",
+      "code": "ja-easy",
       "ja": "やさしい日本語",
       "en": "Easy Japanese"
     }

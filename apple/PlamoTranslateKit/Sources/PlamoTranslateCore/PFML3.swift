@@ -10,7 +10,7 @@ public enum PFML3Error: LocalizedError, Equatable, Sendable {
         switch self {
         case .emptyText(let f): return "\(f)が空です。"
         case .reservedToken(let f): return "\(f)に予約済みトークン（<|plamo:…）を含めることはできません。"
-        case .invalidLanguage(let f, let v): return "\(f)の言語コード「\(v)」が不正です（例: en, ja, zh-hans, ja(easy)）。"
+        case .invalidLanguage(let f, let v): return "\(f)の言語コード「\(v)」が不正です（例: en, ja, zh-hans, ja-easy）。"
         case .formRequiresJapanese: return "文体（form）は翻訳先が日本語（ja）のときのみ指定できます。"
         }
     }
@@ -34,7 +34,11 @@ public enum PFML3 {
         if s.contains(reserved) { throw PFML3Error.reservedToken(field: name) }
     }
 
-    /// 小文字 2-3 文字、任意で `-` + 4 文字のスクリプト、または `ja(easy)`。
+    /// 言語コードを PFML3 での表記に正規化する。やさしい日本語の旧表記 `ja(easy)` は `ja-easy` にする
+    /// （公式チャットテンプレート 2026-11-07 版と同じ扱い）。
+    public static func normalizeLang(_ v: String) -> String { v == "ja(easy)" ? "ja-easy" : v }
+
+    /// 小文字 2-3 文字、任意で `-` + 4 文字（スクリプトまたは `easy`）。旧表記 `ja(easy)` も受け付ける。
     public static func isValidLangCode(_ v: String) -> Bool {
         if v == "ja(easy)" { return true }
         let parts = v.split(separator: "-", omittingEmptySubsequences: false)
@@ -56,7 +60,9 @@ public enum PFML3 {
         try checkText(r.text, "原文")
         try checkLang(r.targetLang, "翻訳先言語")
         if let s = r.sourceLang { try checkLang(s, "翻訳元言語") }
-        if r.form != nil && r.targetLang != "ja" { throw PFML3Error.formRequiresJapanese }
+        let targetLang = normalizeLang(r.targetLang)
+        let sourceLang = r.sourceLang.map(normalizeLang)
+        if r.form != nil && targetLang != "ja" { throw PFML3Error.formRequiresJapanese }
 
         var out = "<|plamo:tag|>dataset<|plamo:msg|>translation"
 
@@ -65,12 +71,12 @@ public enum PFML3 {
             out += "<|plamo:tag|>context<|plamo:msg|>" + c
         }
 
-        let srcKey = r.sourceLang.map { "<|plamo:key|>lang<|plamo:val|>" + $0 } ?? ""
+        let srcKey = sourceLang.map { "<|plamo:key|>lang<|plamo:val|>" + $0 } ?? ""
         for h in r.history {
             try checkText(h.source, "履歴の原文")
             try checkText(h.translation, "履歴の訳文")
             out += "<|plamo:tag|>input" + srcKey + "<|plamo:msg|>" + h.source
-            out += "<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>" + r.targetLang + "<|plamo:msg|>" + h.translation
+            out += "<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>" + targetLang + "<|plamo:msg|>" + h.translation
         }
 
         if !r.glossary.isEmpty {
@@ -83,7 +89,7 @@ public enum PFML3 {
         }
 
         out += "<|plamo:tag|>input" + srcKey + "<|plamo:msg|>" + r.text
-        out += "<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>" + r.targetLang
+        out += "<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>" + targetLang
         if let f = r.form { out += "<|plamo:key|>form<|plamo:val|>" + f.rawValue }
         out += "<|plamo:msg|>"
         return out

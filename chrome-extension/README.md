@@ -61,7 +61,7 @@ macOS アプリ方式では、さらに `GET /health`（`ok` / `loading` / `no_m
 | 2B | 1.8 GB | 4 GB〜 | 精度と速度のバランス |
 | 8B | 5.3 GB | 8 GB〜 | 最高精度（macOS アプリ / llama-server） |
 
-カタログは `../shared/models.json`、言語は `../shared/languages.json`（53 言語 + やさしい日本語 `ja(easy)`）からビルド時に取り込みます。
+カタログは `../shared/models.json`、言語は `../shared/languages.json`（53 言語 + やさしい日本語 `ja-easy`）からビルド時に取り込みます。
 
 ## トラブルシューティング
 

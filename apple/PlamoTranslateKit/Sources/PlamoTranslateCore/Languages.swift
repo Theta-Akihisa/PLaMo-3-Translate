@@ -22,14 +22,15 @@ public enum LanguageCatalog {
     /// 翻訳先として選べる言語（`all` + やさしい日本語）。
     public static let targets: [Language] = {
         var t = all
-        if !t.contains(where: { $0.code == "ja(easy)" }) {
-            t.append(Language(code: "ja(easy)", ja: "やさしい日本語", en: "Easy Japanese"))
+        if !t.contains(where: { $0.code == "ja-easy" }) {
+            t.append(Language(code: "ja-easy", ja: "やさしい日本語", en: "Easy Japanese"))
         }
         return t
     }()
 
     /// 表示名（日本語）。未知のコードはコードそのまま。
     public static func name(for code: String) -> String {
-        targets.first { $0.code == code }?.ja ?? code
+        let c = PFML3.normalizeLang(code)
+        return targets.first { $0.code == c }?.ja ?? code
     }
 }

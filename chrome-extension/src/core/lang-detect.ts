@@ -30,6 +30,7 @@ export function looksLikeLang(text: string, lang: string): boolean {
   const latin = count(text, RE.latin);
   switch (lang) {
     case 'ja':
+    case 'ja-easy':
     case 'ja(easy)':
       return kana / letters > 0.1 || (kana + han) / letters > 0.5;
     case 'zh-hans':
