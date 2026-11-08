@@ -13,6 +13,9 @@ PFML3 プロンプトを **アプリ側で直接組み立てて** 補完（compl
 
 テストベクタの再生成: `python3 tools/gen_pfml3_vectors.py`（要 `jinja2`）
 
+モデルカタログの更新: `python3 tools/update_model_catalog.py`（Hugging Face API から最新リビジョンのサイズ・SHA-256 を取得し、ダウンロード URL を `resolve/<revision>/` に固定）→ `apple/scripts/sync-shared.sh`。
+URL を `resolve/main` にすると、配布元がファイルを更新したときにサイズ・SHA-256 の検証で失敗するため、必ずリビジョンを固定します。
+
 ## PFML3 プロンプト（翻訳リクエスト → 文字列）
 
 入力: `text`（必須）, `targetLang`（既定 `ja`）, `sourceLang?`, `form?`（`plain`|`polite`、`targetLang == "ja"` のときのみ）,

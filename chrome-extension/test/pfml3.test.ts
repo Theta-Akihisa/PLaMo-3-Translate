@@ -43,7 +43,7 @@ describe('validation', () => {
     expect(() => buildPrompt({ text: 'x', form: 'weird' as never })).toThrow(Pfml3Error);
   });
   it('validates language codes', () => {
-    for (const c of ['ja', 'en', 'zh-hans', 'zh-hant', 'ja(easy)', 'ceb']) expect(isValidLangCode(c)).toBe(true);
+    for (const c of ['ja', 'en', 'zh-hans', 'zh-hant', 'ja-easy', 'ja(easy)', 'ceb']) expect(isValidLangCode(c)).toBe(true);
     for (const c of ['EN', 'en-US', 'e', 'zh-hans-x', 'ja easy', 'jp1']) expect(isValidLangCode(c)).toBe(false);
     expect(() => buildPrompt({ text: 'x', targetLang: 'en-US' })).toThrow(Pfml3Error);
   });
@@ -89,5 +89,11 @@ describe('misc', () => {
     expect(looksLikeLang('The quick brown fox jumps over the lazy dog and the cat.', 'en')).toBe(true);
     expect(looksLikeLang('Bonjour tout le monde', 'ja')).toBe(false);
     expect(looksLikeLang('12345', 'ja')).toBe(true);
+  });
+});
+
+describe('model catalog pinning', () => {
+  it('downloads from a pinned revision, not main', () => {
+    for (const m of MODELS) for (const f of m.files) expect(f.url).not.toContain('/resolve/main/');
   });
 });

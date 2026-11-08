@@ -51,7 +51,9 @@ CASES = [
          {"source": "It lists all active tasks.", "translation": "進行中のタスクがすべて表示されます。"},
      ]},
     {"name": "zh_hans_target", "text": "Good morning.", "target_lang": "zh-hans"},
-    {"name": "easy_japanese", "text": "Evacuate to higher ground immediately.", "target_lang": "ja(easy)"},
+    {"name": "easy_japanese", "text": "Evacuate to higher ground immediately.", "target_lang": "ja-easy"},
+    # 旧表記 ja(easy) は公式テンプレートで ja-easy の別名として扱われる
+    {"name": "easy_japanese_alias", "text": "Evacuate to higher ground immediately.", "target_lang": "ja(easy)"},
     {"name": "multiline_text", "text": "Line one.\nLine two.\n\nParagraph two with `code`.", "target_lang": "ja"},
 ]
 

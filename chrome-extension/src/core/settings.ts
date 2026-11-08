@@ -103,6 +103,11 @@ export function migrateSettings(raw: unknown): { settings: Settings; changed: bo
     changed = true;
   }
   const settings = { ...DEFAULT_SETTINGS, ...(r as Partial<Settings>), version: SETTINGS_VERSION };
+  // やさしい日本語の旧表記を移行
+  if (settings.targetLang === 'ja(easy)') {
+    settings.targetLang = 'ja-easy';
+    changed = true;
+  }
   if (typeof settings.appEndpoint !== 'string' || !settings.appEndpoint.trim()) settings.appEndpoint = APP_ENDPOINT;
   if (typeof settings.endpoint !== 'string' || !settings.endpoint.trim()) settings.endpoint = SERVER_ENDPOINT;
   return { settings, changed };

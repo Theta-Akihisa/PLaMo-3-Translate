@@ -133,9 +133,17 @@
       "name": "easy_japanese",
       "input": {
         "text": "Evacuate to higher ground immediately.",
+        "target_lang": "ja-easy"
+      },
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>Evacuate to higher ground immediately.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja-easy<|plamo:msg|>"
+    },
+    {
+      "name": "easy_japanese_alias",
+      "input": {
+        "text": "Evacuate to higher ground immediately.",
         "target_lang": "ja(easy)"
       },
-      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>Evacuate to higher ground immediately.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja(easy)<|plamo:msg|>"
+      "prompt": "<|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>input<|plamo:msg|>Evacuate to higher ground immediately.<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ja-easy<|plamo:msg|>"
     },
     {
       "name": "multiline_text",

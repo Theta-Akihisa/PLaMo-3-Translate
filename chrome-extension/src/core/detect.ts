@@ -42,7 +42,7 @@ export function detectLanguage(text: string): Promise<Detected> {
  */
 export function smartTarget(detected: string | null, target: string): string {
   if (!detected) return target;
-  const same = detected === target || (detected === 'ja' && target === 'ja(easy)');
+  const same = detected === target || (detected === 'ja' && (target === 'ja-easy' || target === 'ja(easy)'));
   if (!same) return target;
   return detected === 'en' ? 'ja' : 'en';
 }

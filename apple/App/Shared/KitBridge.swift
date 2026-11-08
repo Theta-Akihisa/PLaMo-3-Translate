@@ -96,6 +96,8 @@ final class AppModel: ObservableObject {
         let d = UserDefaults.standard
         var s: TranslationSettings = d.data(forKey: Keys.settings)
             .flatMap { try? JSONDecoder().decode(TranslationSettings.self, from: $0) } ?? TranslationSettings()
+        // 旧表記のやさしい日本語（ja(easy)）を ja-easy に移行
+        s.targetLang = PFML3.normalizeLang(s.targetLang)
         if ModelCatalog.spec(id: s.modelID) == nil {
             s.modelID = ModelCatalog.defaultModel.id
             s.quant = ModelCatalog.defaultModel.defaultQuant
@@ -276,7 +278,7 @@ final class AppModel: ObservableObject {
         if autoDetected { s.sourceLang = LanguageDetector.detect(text) }
         if let t = targetLang {
             s.targetLang = t
-        } else if autoDetected, let src = s.sourceLang, src == (s.targetLang == "ja(easy)" ? "ja" : s.targetLang) {
+        } else if autoDetected, let src = s.sourceLang, src == (PFML3.normalizeLang(s.targetLang) == "ja-easy" ? "ja" : s.targetLang) {
             s.targetLang = (src == "ja") ? "en" : "ja"   // DeepL 風: 同一言語なら ja⇄en
         }
         if s.targetLang != "ja" { s.form = nil }
@@ -329,7 +331,7 @@ final class AppModel: ObservableObject {
         let d = LanguageDetector.detect(sourceText)
         detectedLang = d
         guard let d else { return }
-        let target = settings.targetLang == "ja(easy)" ? "ja" : settings.targetLang
+        let target = PFML3.normalizeLang(settings.targetLang) == "ja-easy" ? "ja" : settings.targetLang
         if d == target {
             settings.targetLang = (d == "ja") ? "en" : "ja"
             settings.form = nil
@@ -429,7 +431,7 @@ final class AppModel: ObservableObject {
 
     func swapLanguages() {
         guard let src = settings.sourceLang ?? detectedLang else { return }
-        let newSource = settings.targetLang == "ja(easy)" ? "ja" : settings.targetLang
+        let newSource = PFML3.normalizeLang(settings.targetLang) == "ja-easy" ? "ja" : settings.targetLang
         settings.sourceLang = newSource
         settings.targetLang = src
         if settings.targetLang != "ja" { settings.form = nil }
