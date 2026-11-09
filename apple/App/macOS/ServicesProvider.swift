@@ -263,7 +263,13 @@ struct ServiceResultView: View {
             }
         }
         .onChange(of: output) { _, newValue in
-            ResultPanelController.shared.fitToContent(source: source, output: newValue)
+            // SwiftUI の更新中にウィンドウの大きさを変えると再入レイアウトになるので、次の周回で行う
+            let source = source
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    ResultPanelController.shared.fitToContent(source: source, output: newValue)
+                }
+            }
         }
         .onDisappear { task?.cancel() }
     }
