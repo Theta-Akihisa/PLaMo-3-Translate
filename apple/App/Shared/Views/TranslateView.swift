@@ -19,6 +19,11 @@ struct TextDocument: FileDocument {
 struct TranslateView: View {
     @EnvironmentObject var model: AppModel
     @FocusState private var sourceFocused: Bool
+    /// 原文・訳文のスクロール連動
+    @StateObject private var scrollSync = ScrollSyncController()
+    @AppStorage(TextScale.key) private var textScale = TextScale.defaultValue
+    @ScaledMetric(relativeTo: .title3) private var baseFontSize: CGFloat = TextScale.basePointSize
+    private var paneFontSize: CGFloat { baseFontSize * TextScale.clamp(textScale) }
     @State private var showGlossary = false
     @State private var showExporter = false
     #if os(iOS)
@@ -85,12 +90,8 @@ struct TranslateView: View {
     private var sourcePane: some View {
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
-                TextEditor(text: $model.sourceText)
-                    .translationTextFont()
-                    .focused($sourceFocused)
-                    .scrollContentBackground(.hidden)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 10)
+                SyncedTextView(text: $model.sourceText, isEditable: true, fontSize: paneFontSize,
+                               side: .source, controller: scrollSync)
                 if model.sourceText.isEmpty {
                     emptyOverlay
                 }
@@ -224,7 +225,7 @@ struct TranslateView: View {
             }
         }
         .padding(.horizontal, 17)
-        .padding(.top, 18)
+        .padding(.top, 12)
     }
 
     private var counterText: String {
@@ -260,6 +261,7 @@ struct TranslateView: View {
             Spacer()
             if model.isTranslating { ProgressView().controlSize(.small) }
             TextSizeMenu()
+            ScrollSyncToggle()
             if !model.outputText.isEmpty {
                 Button { Clipboard.copy(model.outputText) } label: { Label("コピー", systemImage: "doc.on.doc") }
                 ShareLink(item: model.outputText) { Label("共有", systemImage: "square.and.arrow.up") }
@@ -284,20 +286,23 @@ struct TranslateView: View {
     private var targetPane: some View {
         VStack(spacing: 0) {
             targetToolbar
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    if let err = model.errorMessage {
-                        Text(err).foregroundStyle(.red).font(.callout)
-                    }
-                    if model.outputText.isEmpty, model.errorMessage == nil {
-                        Text("訳文がここに表示されます").translationTextFont().foregroundStyle(.tertiary)
-                    } else {
-                        Text(model.outputText).translationTextFont().textSelection(.enabled)
-                    }
+            if let err = model.errorMessage {
+                Text(err).foregroundStyle(.red).font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 17)
+                    .padding(.bottom, 4)
+            }
+            ZStack(alignment: .topLeading) {
+                SyncedTextView(text: Binding(get: { model.outputText }, set: { _ in }), isEditable: false,
+                               fontSize: paneFontSize, side: .target, controller: scrollSync)
+                if model.outputText.isEmpty, model.errorMessage == nil {
+                    Text("訳文がここに表示されます")
+                        .translationTextFont()
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 17)
+                        .padding(.top, 12)
+                        .allowsHitTesting(false)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 14)
             }
             HStack(spacing: 6) {
                 if model.isLoadingModel { ProgressView().controlSize(.mini) }

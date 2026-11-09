@@ -22,6 +22,47 @@ final class ServicesProvider: NSObject {
 final class ResultPanelController {
     static let shared = ResultPanelController()
     private var panel: NSPanel?
+    private var keyWindowObserver: NSObjectProtocol?
+    /// 表示直後はアプリのアクティブ化で前のウィンドウが一瞬キーになることがあるので無視する
+    private var shownAt = Date.distantPast
+
+    private init() {
+        // メインウィンドウへ移った（クリック・Dock・「メインウィンドウで開く」）らクイック翻訳パネルを閉じる
+        keyWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { note in
+            MainActor.assumeIsolated {
+                guard let window = note.object as? NSWindow else { return }
+                ResultPanelController.shared.windowDidBecomeKey(window)
+            }
+        }
+    }
+
+    private func windowDidBecomeKey(_ window: NSWindow) {
+        guard let panel, panel.isVisible, window !== panel,
+              Date().timeIntervalSince(shownAt) > 0.6 else { return }
+        // メインウィンドウ（パネル・メニューバーのポップアップ以外）が前面になったときだけ閉じる
+        if !(window is NSPanel), window.canBecomeMain {
+            close()
+        }
+    }
+
+    func close() {
+        panel?.close()   // ServiceResultView の onDisappear で進行中の翻訳も止まる
+        panel = nil
+    }
+
+    /// パネルを閉じてメインウィンドウを前面に出す。ウィンドウが閉じられていれば開き直す
+    func openMainWindow() {
+        close()
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { !($0 is NSPanel) && $0.canBecomeMain }) {
+            window.makeKeyAndOrderFront(nil)
+        } else if let url = URL(string: "plamotranslate://open") {
+            // メインウィンドウが無い場合は URL スキーム経由で WindowGroup に新しいウィンドウを作らせる
+            NSWorkspace.shared.open(url)
+        }
+    }
 
     func show(source: String, nearMouse: Bool = false) {
         panel?.close()
@@ -46,9 +87,10 @@ final class ResultPanelController {
         } else {
             p.center()
         }
-        p.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        shownAt = Date()
         panel = p
+        NSApp.activate(ignoringOtherApps: true)
+        p.makeKeyAndOrderFront(nil)
     }
 }
 
@@ -80,8 +122,7 @@ struct ServiceResultView: View {
             HStack {
                 Button("メインウィンドウで開く") {
                     model.translate(externalText: source)
-                    NSApp.activate(ignoringOtherApps: true)
-                    NSApp.windows.first { !($0 is NSPanel) && $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
+                    ResultPanelController.shared.openMainWindow()
                 }
                 Spacer()
                 Button("コピー") { Clipboard.copy(output) }.disabled(output.isEmpty)
