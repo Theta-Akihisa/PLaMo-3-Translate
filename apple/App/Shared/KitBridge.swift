@@ -63,6 +63,16 @@ final class AppModel: ObservableObject {
     @Published var isTranslating = false
     @Published var errorMessage: String?
 
+    // ファイル読み込み（.txt / .md / .rtf / .pdf）
+    /// ファイル選択ダイアログを開く要求（⌘O・ボタンから）
+    @Published var showFileImporter = false
+    /// 読み込み中の進み具合（PDF のページ単位, 0...1）。nil なら読み込み中でない
+    @Published private(set) var fileLoadProgress: Double?
+    /// 直前に読み込んだファイルの説明（原文を編集すると消える）
+    @Published private(set) var loadedFileSummary: String?
+    private var fileLoadTask: Task<Void, Never>?
+    private var assigningFileText = false
+
     // モデル管理の状態
     @Published private(set) var downloading: Set<String> = []
     @Published var downloadErrors: [String: String] = [:]
@@ -310,6 +320,7 @@ final class AppModel: ObservableObject {
     // MARK: ライブ翻訳
 
     private func sourceChanged(old: String) {
+        if !assigningFileText { loadedFileSummary = nil }
         guard !suppressLive, sourceText != old else { return }
         debounceTask?.cancel()
         stopTranslation()   // 編集されたら進行中の生成を中断
@@ -412,21 +423,41 @@ final class AppModel: ObservableObject {
     }
 
     /// 文字列を取り出す（ドラッグ&ドロップ / ファイル読み込み用）
+    /// ファイル（.txt / .md / .rtf / .pdf）を読み込んで原文にする。PDF は段落に組み直し、スキャンページは文字認識する。
     func loadText(from url: URL) {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        do {
-            let data = try Data(contentsOf: url)
-            guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .shiftJIS) else {
-                errorMessage = "テキストとして読み込めませんでした。"
-                return
+        fileLoadTask?.cancel()
+        stopTranslation()
+        errorMessage = nil
+        fileLoadProgress = 0
+        fileLoadTask = Task { [weak self] in
+            do {
+                let result = try await FileTextLoader.load(url: url) { p in
+                    Task { @MainActor [weak self] in
+                        if self?.fileLoadProgress != nil { self?.fileLoadProgress = p }
+                    }
+                }
+                guard let self, !Task.isCancelled else { return }
+                self.fileLoadProgress = nil
+                self.assigningFileText = true
+                self.immediateNext = true
+                self.sourceText = result.text
+                self.immediateNext = false
+                self.assigningFileText = false
+                self.loadedFileSummary = result.summary
+            } catch is CancellationError {
+                self?.fileLoadProgress = nil
+            } catch {
+                guard let self else { return }
+                self.fileLoadProgress = nil
+                self.errorMessage = error.localizedDescription
             }
-            immediateNext = true
-            sourceText = text
-            immediateNext = false
-        } catch {
-            errorMessage = error.localizedDescription
         }
+    }
+
+    func cancelFileLoad() {
+        fileLoadTask?.cancel()
+        fileLoadTask = nil
+        fileLoadProgress = nil
     }
 
     func swapLanguages() {

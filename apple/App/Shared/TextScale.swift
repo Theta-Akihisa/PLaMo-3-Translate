@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// 翻訳テキスト（原文・訳文）の文字サイズ倍率。`@AppStorage(TextScale.key)` で全画面が共有する。
 ///
@@ -152,6 +155,29 @@ struct TextSizeSettingsSection: View {
             #else
             Text("原文・訳文の上でピンチしても変更できます。外部キーボードでは ⌘+ / ⌘− / ⌘0 が使えます。")
             #endif
+        }
+    }
+}
+
+/// ファイル メニュー:「ファイルを開く…」（⌘O）。PDF・テキスト・RTF を原文として読み込む。
+struct OpenFileCommands: Commands {
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
+
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("ファイルを開く…") {
+                #if os(macOS)
+                // メインウィンドウが閉じていても開けるように、先にウィンドウを出す
+                if !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
+                    openWindow(id: "main")
+                }
+                NSApp.activate(ignoringOtherApps: true)
+                #endif
+                AppModel.shared.showFileImporter = true
+            }
+            .keyboardShortcut("o", modifiers: .command)
         }
     }
 }

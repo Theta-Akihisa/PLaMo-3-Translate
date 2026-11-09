@@ -23,7 +23,10 @@ struct PlamoTranslateMacApp: App {
                 .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
         .handlesExternalEvents(matching: ["*"])
-        .commands { TextSizeCommands() }
+        .commands {
+            OpenFileCommands()
+            TextSizeCommands()
+        }
 
         MenuBarExtra("PLaMo 翻訳", systemImage: "character.bubble") {
             QuickTranslateView()
@@ -42,6 +45,12 @@ struct PlamoTranslateMacApp: App {
 @MainActor
 enum MacURLHandler {
     static func handle(_ url: URL, model: AppModel) {
+        // Finder の「このアプリケーションで開く」・Dock へのドロップで渡された PDF / テキスト
+        if url.isFileURL {
+            NSApp.activate(ignoringOtherApps: true)
+            model.loadText(from: url)
+            return
+        }
         guard url.scheme?.lowercased() == "plamotranslate" else { return }
         NSApp.activate(ignoringOtherApps: true)
         switch url.host?.lowercased() {

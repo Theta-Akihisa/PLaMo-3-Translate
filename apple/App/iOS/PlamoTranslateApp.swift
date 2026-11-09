@@ -12,7 +12,10 @@ struct PlamoTranslateApp: App {
                 .environmentObject(model)
         }
         // iPad / 外部キーボード: ⌘+ / ⌘− / ⌘0 で文字サイズ
-        .commands { TextSizeCommands() }
+        .commands {
+            OpenFileCommands()
+            TextSizeCommands()
+        }
     }
 }
 
@@ -34,8 +37,16 @@ struct RootTabView: View {
                 .tag(2)
         }
         .onboardingSheet()
+        // ⌘O（ファイルを開く）は翻訳タブで受ける
+        .onChange(of: model.showFileImporter) { _, open in if open { tab = 0 } }
         // plamotranslate://translate?text=...&target=en&source=ja
         .onOpenURL { url in
+            // 他のアプリから「PLaMo Translate で開く」で渡された PDF / テキスト
+            if url.isFileURL {
+                tab = 0
+                model.loadText(from: url)
+                return
+            }
             guard url.scheme == "plamotranslate", url.host == "translate",
                   let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return }
             func value(_ name: String) -> String? { items.first { $0.name == name }?.value }

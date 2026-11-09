@@ -111,8 +111,32 @@ struct TranslateView: View {
                     }
                 }
             }
+            if let p = model.fileLoadProgress {
+                HStack(spacing: 8) {
+                    ProgressView(value: p).frame(maxWidth: 160)
+                    Text("ファイルを読み込み中…").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("中止") { model.cancelFileLoad() }.controlSize(.small)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
+            } else if let summary = model.loadedFileSummary {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.text").foregroundStyle(.secondary)
+                    Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
+            }
             HStack {
                 Text(counterText).font(.caption).foregroundStyle(.secondary)
+                Button { model.showFileImporter = true } label: {
+                    Label("ファイルを開く", systemImage: "doc.badge.plus")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .help("ファイルを開く（⌘O）— テキスト / PDF / RTF")
                 Spacer()
                 if !model.liveTranslate || model.isTranslating == false && model.outputText.isEmpty && !model.sourceText.isEmpty {
                     Button("翻訳") { sourceFocused = false; model.startTranslation() }
@@ -124,13 +148,50 @@ struct TranslateView: View {
             .padding(.vertical, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first(where: { ["txt", "md", "markdown", "text"].contains($0.pathExtension.lowercased()) }) else {
-                return false
+        .onDrop(of: FileTextLoader.supportedTypes + [.fileURL], isTargeted: nil) { providers in
+            handleFileDrop(providers)
+        }
+        .fileImporter(isPresented: $model.showFileImporter,
+                      allowedContentTypes: FileTextLoader.supportedTypes) { result in
+            switch result {
+            case .success(let url): model.loadText(from: url)
+            case .failure(let error): model.errorMessage = error.localizedDescription
             }
-            model.loadText(from: url)
+        }
+    }
+
+    /// Finder / ファイル App などからドロップされたファイルを読み込む
+    private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        let model = self.model
+        // ファイルの実体を受け取る（iOS のファイル App・macOS の Finder の両方で使える）
+        if let type = FileTextLoader.supportedTypes.first(where: { provider.hasItemConformingToTypeIdentifier($0.identifier) }) {
+            provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, _ in
+                guard let url else { return }
+                // url はこのコールバックの間だけ有効なので一時フォルダへコピーする
+                var name = url.lastPathComponent
+                if URL(fileURLWithPath: name).pathExtension.isEmpty, let ext = type.preferredFilenameExtension {
+                    name += "." + ext
+                }
+                let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                let dest = dir.appendingPathComponent(name)
+                do {
+                    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    try FileManager.default.copyItem(at: url, to: dest)
+                } catch { return }
+                Task { @MainActor in model.loadText(from: dest) }
+            }
             return true
         }
+        // ファイル URL（形式が拡張子でしか判別できない場合）
+        if provider.canLoadObject(ofClass: URL.self) {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url, url.isFileURL, FileTextLoader.isSupported(url) else { return }
+                Task { @MainActor in model.loadText(from: url) }
+            }
+            return true
+        }
+        return false
     }
 
     /// 空のときの案内と、目立つ貼り付けボタン（DeepL iOS 風）
@@ -139,14 +200,22 @@ struct TranslateView: View {
             Text("翻訳したいテキストを入力")
                 .translationTextFont().foregroundStyle(.tertiary)
                 .allowsHitTesting(false)
-            Button { model.pasteFromClipboard() } label: {
-                Label("貼り付け", systemImage: "doc.on.clipboard")
-                    .font(.headline)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
+            HStack(spacing: 10) {
+                Button { model.pasteFromClipboard() } label: {
+                    Label("貼り付け", systemImage: "doc.on.clipboard")
+                        .font(.headline)
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                Button { model.showFileImporter = true } label: {
+                    Label("ファイル（PDF など）", systemImage: "doc.badge.plus")
+                        .font(.headline)
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.borderedProminent)
             #if os(macOS)
-            Text(".txt / .md ファイルをここにドラッグして翻訳できます")
+            Text("PDF・テキスト（.txt / .md）・RTF ファイルをここにドラッグするか、⌘O で開いて翻訳できます")
                 .font(.caption).foregroundStyle(.tertiary)
             #endif
             if !model.hasAnyInstalledModel {
