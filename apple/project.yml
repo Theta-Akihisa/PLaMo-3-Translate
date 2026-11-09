@@ -1,7 +1,7 @@
 # XcodeGen spec — `xcodegen generate` で PlamoTranslate.xcodeproj を生成する
 name: PlamoTranslate
 options:
-  bundleIdPrefix: jp.example   # プレースホルダ。自分のものに変更すること
+  bundleIdPrefix: jp.theta   # プレースホルダ。自分のものに変更すること
   deploymentTarget:
     iOS: "17.0"
     macOS: "14.0"
@@ -34,7 +34,7 @@ targets:
         product: PlamoTranslateKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: jp.example.plamotranslate
+        PRODUCT_BUNDLE_IDENTIFIER: jp.theta.plamotranslate
         TARGETED_DEVICE_FAMILY: "1,2"
         SDKROOT: iphoneos
         SUPPORTED_PLATFORMS: "iphoneos"     # llama.xcframework に Simulator スライスが無いため実機のみ
@@ -58,7 +58,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
         CFBundleURLTypes:
-          - CFBundleURLName: jp.example.plamotranslate
+          - CFBundleURLName: jp.theta.plamotranslate
             CFBundleURLSchemes:
               - plamotranslate
     entitlements:
@@ -80,7 +80,7 @@ targets:
         product: PlamoTranslateKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: jp.example.plamotranslate
+        PRODUCT_BUNDLE_IDENTIFIER: jp.theta.plamotranslate
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
     info:
@@ -93,7 +93,7 @@ targets:
         LSApplicationCategoryType: public.app-category.productivity
         # plamotranslate://open — Chrome 拡張機能の「アプリを起動」ボタンから開く（shared/local-api.md）
         CFBundleURLTypes:
-          - CFBundleURLName: jp.example.plamotranslate
+          - CFBundleURLName: jp.theta.plamotranslate
             CFBundleURLSchemes:
               - plamotranslate
         NSServices:
@@ -125,7 +125,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_NAME: PlamoTranslateTests
         PRODUCT_MODULE_NAME: PlamoTranslateTests
-        PRODUCT_BUNDLE_IDENTIFIER: jp.example.plamotranslate.tests
+        PRODUCT_BUNDLE_IDENTIFIER: jp.theta.plamotranslate.tests
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/PlamoTranslate.app/Contents/MacOS/PlamoTranslate
         BUNDLE_LOADER: $(TEST_HOST)
 
