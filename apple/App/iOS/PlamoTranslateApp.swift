@@ -11,6 +11,8 @@ struct PlamoTranslateApp: App {
             RootTabView()
                 .environmentObject(model)
         }
+        // iPad / 外部キーボード: ⌘+ / ⌘− / ⌘0 で文字サイズ
+        .commands { TextSizeCommands() }
     }
 }
 

@@ -8,6 +8,8 @@ struct TranslationSettingsView: View {
 
     var body: some View {
         Form {
+            TextSizeSettingsSection()
+
             Section {
                 Toggle("入力しながら自動翻訳", isOn: $model.liveTranslate)
             } footer: {

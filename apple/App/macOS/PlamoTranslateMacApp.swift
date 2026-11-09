@@ -23,6 +23,7 @@ struct PlamoTranslateMacApp: App {
                 .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
         .handlesExternalEvents(matching: ["*"])
+        .commands { TextSizeCommands() }
 
         MenuBarExtra("PLaMo 翻訳", systemImage: "character.bubble") {
             QuickTranslateView()
@@ -60,9 +61,11 @@ enum MacURLHandler {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let servicesProvider = ServicesProvider()
+    private var textSizeKeyMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         APISettings.registerDefaults()
+        installTextSizeKeyMonitor()
         NSApp.servicesProvider = servicesProvider
         NSUpdateDynamicServices()
         LocalAPIController.shared.applyStoredSettings()
@@ -72,6 +75,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DoubleCopyMonitor.shared.refreshTrust(prompt: true)
         }
         DoubleCopyMonitor.shared.startSupervising()
+    }
+
+    /// 文字サイズのショートカットをキーボード配列に依存せず受け付ける。
+    /// 表示メニューの ⌘+ は US 配列では ⌘= / ⌘⇧=、JIS 配列では ⌘⇧; で入力されるため、
+    /// メニューの照合に任せず、ここで文字を見て処理する（クイック翻訳などのパネルでも効く）。
+    private func installTextSizeKeyMonitor() {
+        textSizeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard mods.contains(.command), !mods.contains(.control), !mods.contains(.option) else { return event }
+            switch event.charactersIgnoringModifiers {
+            case "+", "=":
+                TextScale.increase()
+                return nil
+            case "-":
+                guard !mods.contains(.shift) else { return event }
+                TextScale.decrease()
+                return nil
+            case "0":
+                guard !mods.contains(.shift) else { return event }
+                TextScale.reset()
+                return nil
+            default:
+                return event
+            }
+        }
     }
 
     /// ウィンドウを閉じてもメニューバーに常駐し、Chrome 拡張機能向けの API を待ち受け続ける

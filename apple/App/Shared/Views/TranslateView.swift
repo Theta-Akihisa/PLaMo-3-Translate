@@ -46,6 +46,7 @@ struct TranslateView: View {
                     }
                 }
             }
+            .pinchToScaleText()
         }
         .navigationTitle("翻訳")
         .onChange(of: model.settings.targetLang) { _, _ in model.retranslateIfLive() }
@@ -85,7 +86,7 @@ struct TranslateView: View {
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 TextEditor(text: $model.sourceText)
-                    .font(.title3)
+                    .translationTextFont()
                     .focused($sourceFocused)
                     .scrollContentBackground(.hidden)
                     .padding(.horizontal, 12)
@@ -136,7 +137,7 @@ struct TranslateView: View {
     private var emptyOverlay: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("翻訳したいテキストを入力")
-                .font(.title3).foregroundStyle(.tertiary)
+                .translationTextFont().foregroundStyle(.tertiary)
                 .allowsHitTesting(false)
             Button { model.pasteFromClipboard() } label: {
                 Label("貼り付け", systemImage: "doc.on.clipboard")
@@ -189,6 +190,7 @@ struct TranslateView: View {
             Button { showGlossary = true } label: { Label("用語集", systemImage: "character.book.closed") }
             Spacer()
             if model.isTranslating { ProgressView().controlSize(.small) }
+            TextSizeMenu()
             if !model.outputText.isEmpty {
                 Button { Clipboard.copy(model.outputText) } label: { Label("コピー", systemImage: "doc.on.doc") }
                 ShareLink(item: model.outputText) { Label("共有", systemImage: "square.and.arrow.up") }
@@ -219,9 +221,9 @@ struct TranslateView: View {
                         Text(err).foregroundStyle(.red).font(.callout)
                     }
                     if model.outputText.isEmpty, model.errorMessage == nil {
-                        Text("訳文がここに表示されます").font(.title3).foregroundStyle(.tertiary)
+                        Text("訳文がここに表示されます").translationTextFont().foregroundStyle(.tertiary)
                     } else {
-                        Text(model.outputText).font(.title3).textSelection(.enabled)
+                        Text(model.outputText).translationTextFont().textSelection(.enabled)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
