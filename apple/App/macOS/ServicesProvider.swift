@@ -63,7 +63,7 @@ struct ServiceResultView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("原文").font(.caption).foregroundStyle(.secondary)
-            ScrollView { Text(source).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+            ScrollView { Text(source).translationTextFont().textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                 .frame(maxHeight: 90)
             Divider()
             HStack {
@@ -73,7 +73,7 @@ struct ServiceResultView: View {
             ScrollView {
                 VStack(alignment: .leading) {
                     if let error { Text(error).foregroundStyle(.red) }
-                    Text(output).textSelection(.enabled)
+                    Text(output).translationTextFont().textSelection(.enabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

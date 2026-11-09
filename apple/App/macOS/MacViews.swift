@@ -46,6 +46,8 @@ struct MacRootView: View {
         }
         .frame(minWidth: 760, minHeight: 520)
         .onboardingSheet()
+        // ⌘O（ファイルを開く）は翻訳画面で受ける
+        .onChange(of: model.showFileImporter) { _, open in if open { selection = .translate } }
     }
 }
 

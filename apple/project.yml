@@ -61,6 +61,17 @@ targets:
           - CFBundleURLName: jp.theta.plamotranslate
             CFBundleURLSchemes:
               - plamotranslate
+        # 他のアプリから PDF / テキスト / RTF を「PLaMo Translate で開く」
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: 翻訳する文書
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.adobe.pdf
+              - public.plain-text
+              - public.rtf
+              - net.daringfireball.markdown
+        LSSupportsOpeningDocumentsInPlace: false
     entitlements:
       path: Config/iOS.entitlements
       properties:
@@ -96,6 +107,16 @@ targets:
           - CFBundleURLName: jp.theta.plamotranslate
             CFBundleURLSchemes:
               - plamotranslate
+        # 他のアプリから PDF / テキスト / RTF を「PLaMo Translate で開く」
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: 翻訳する文書
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.adobe.pdf
+              - public.plain-text
+              - public.rtf
+              - net.daringfireball.markdown
         NSServices:
           - NSMenuItem:
               default: PLaMoで翻訳
