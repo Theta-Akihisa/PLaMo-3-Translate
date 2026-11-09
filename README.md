@@ -12,6 +12,8 @@ Preferred Networks の翻訳特化 LLM **[PLaMo 3 Translate](https://huggingface
 ※ 8B は RAM 8GB 以上の iPhone / iPad を推奨。
 ※※ npm 最新の wllama 3.8.1（llama.cpp b11364）は PLaMo 3 のトークナイザ（`plamo3`）に未対応のため、現時点ではブラウザ内推論でモデルを読み込めません。wllama が新しい llama.cpp に追従したら依存を更新するだけで有効になります。
 
+<img src="tools/app-icon/preview.png" width="128" alt="アプリアイコン">
+
 ## 構成
 
 ```
@@ -20,7 +22,7 @@ apple/
   PlamoTranslateKit/   Swift パッケージ（PFML3 生成・llama.cpp ラッパー・モデル DL）
   App/                 SwiftUI アプリ（iOS / macOS 共通 + 各 OS 固有）
 chrome-extension/  Manifest V3 拡張機能（TypeScript）
-tools/             テストベクタ生成スクリプト
+tools/             テストベクタ・モデルカタログの生成、アプリアイコン（tools/app-icon/make.sh で再生成）
 ```
 
 ## 設計の要点

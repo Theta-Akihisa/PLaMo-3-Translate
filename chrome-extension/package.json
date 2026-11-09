@@ -8,8 +8,7 @@
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "e2e": "npm run build && node e2e/run.mjs",
-    "icons": "node scripts/make-icons.mjs"
+    "e2e": "npm run build && node e2e/run.mjs"
   },
   "license": "MIT",
   "dependencies": {
