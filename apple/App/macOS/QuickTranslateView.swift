@@ -25,6 +25,7 @@ struct QuickTranslateView: View {
                 .frame(width: 150)
             }
             TextEditor(text: $input)
+                .translationTextFont()
                 .scrollContentBackground(.hidden)
                 .padding(4)
                 .background(Color.gray.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
@@ -45,7 +46,7 @@ struct QuickTranslateView: View {
             ScrollView {
                 VStack(alignment: .leading) {
                     if let error { Text(error).foregroundStyle(.red) }
-                    Text(output).textSelection(.enabled)
+                    Text(output).translationTextFont().textSelection(.enabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
