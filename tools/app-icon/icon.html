@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  PLaMo Translate のアプリアイコン（原本）。tools/app-icon/render.cjs が Chromium で各サイズの PNG に書き出す。
+  クエリ:
+    shape=full     iOS 用（正方形・全面。角丸は OS が付ける）
+    shape=rounded  macOS / Chrome 用（角丸の板 + 余白 + 影）
+    detail=simple  16〜32px 用（"P3" だけの簡略版）
+-->
+<style>
+  @font-face { font-family: "IconLatin"; src: local("Inter Display Black"), local("InterDisplay-Black"); font-weight: 900; }
+  @font-face { font-family: "IconLatin"; src: local("Inter Display Bold"), local("InterDisplay-Bold"); font-weight: 700; }
+  html, body { margin: 0; background: transparent; }
+  #icon { position: relative; width: 1024px; height: 1024px; }
+  .plate {
+    position: absolute; overflow: hidden;
+    background:
+      radial-gradient(120% 90% at 18% 8%, rgba(255,255,255,0.22), rgba(255,255,255,0) 55%),
+      linear-gradient(140deg, #4338ca 0%, #2563eb 45%, #0891b2 100%);
+  }
+  .full .plate { inset: 0; }
+  .rounded .plate {
+    left: 100px; top: 100px; width: 824px; height: 824px; border-radius: 185px;
+    box-shadow: 0 18px 36px rgba(15, 23, 42, 0.32), inset 0 0 0 2px rgba(255,255,255,0.10);
+  }
+  .content { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; color: #fff; }
+  .name {
+    font-family: "IconLatin", "Inter", sans-serif; font-weight: 700;
+    font-size: 176px; letter-spacing: -4px; line-height: 1; margin-top: 112px;
+    text-shadow: 0 4px 12px rgba(0,0,0,0.18);
+  }
+  .three {
+    font-family: "IconLatin", "Inter", sans-serif; font-weight: 900;
+    font-size: 560px; line-height: 0.86; margin-top: 18px; letter-spacing: -10px;
+    background: linear-gradient(180deg, #ffffff 0%, #dbeafe 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 10px 18px rgba(15,23,42,0.28));
+  }
+  .pill {
+    position: absolute; bottom: 92px; height: 128px; padding: 0 44px;
+    display: flex; align-items: center; gap: 22px;
+    background: rgba(255,255,255,0.18); border: 3px solid rgba(255,255,255,0.35); border-radius: 64px;
+    font-size: 92px; line-height: 1;
+  }
+  .pill .a { font-family: "IconLatin", "Inter", sans-serif; font-weight: 700; }
+  .pill .ja { font-family: "IPAPGothic", "IPAGothic", sans-serif; font-weight: 700; transform: translateY(-2px); }
+  .pill svg { width: 96px; height: 64px; }
+
+  /* 簡略版（16〜32px）: 大きな "P3" のみ */
+  .simple .name, .simple .three, .simple .pill { display: none; }
+  .simple .mark {
+    display: block; margin: auto;
+    font-family: "IconLatin", "Inter", sans-serif; font-weight: 900; font-size: 520px; letter-spacing: -24px; line-height: 1;
+  }
+  .mark { display: none; }
+
+  /* macOS 版は板が 824px なので中身も縮める */
+  .rounded .content { transform: scale(0.8047); }
+</style>
+</head>
+<body>
+<div id="icon">
+  <div class="plate">
+  </div>
+  <div class="content">
+    <div class="name">PLaMo</div>
+    <div class="three">3</div>
+    <div class="mark">P3</div>
+    <div class="pill">
+      <span class="a">A</span>
+      <svg viewBox="0 0 96 64" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 20 H84 M68 6 L84 20 L68 34"/>
+        <path d="M88 44 H12 M28 30 L12 44 L28 58"/>
+      </svg>
+      <span class="ja">あ</span>
+    </div>
+  </div>
+</div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const icon = document.getElementById('icon');
+  icon.classList.add(q.get('shape') === 'rounded' ? 'rounded' : 'full');
+  if (q.get('detail') === 'simple') icon.classList.add('simple');
+</script>
+</body>
+</html>
