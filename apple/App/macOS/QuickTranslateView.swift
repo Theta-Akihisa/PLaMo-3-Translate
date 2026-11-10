@@ -4,11 +4,12 @@ import AppKit
 /// メニューバーのクイック翻訳（貼り付けて翻訳）
 struct QuickTranslateView: View {
     @EnvironmentObject var model: AppModel
-    @Environment(\.openWindow) private var openWindow
     @ObservedObject private var api = LocalAPIController.shared
     @State private var input = ""
     @State private var output = ""
     @State private var error: String?
+    /// 訳文が長さの上限で途中で切れたときの警告（途中までの訳文は表示したまま）
+    @State private var warning: String?
     @State private var busy = false
     @State private var task: Task<Void, Never>?
 
@@ -46,6 +47,7 @@ struct QuickTranslateView: View {
             ScrollView {
                 VStack(alignment: .leading) {
                     if let error { Text(error).foregroundStyle(.red) }
+                    if let warning { Label(warning, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.callout) }
                     Text(output).translationTextFont().textSelection(.enabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -54,10 +56,7 @@ struct QuickTranslateView: View {
             HStack {
                 Button("コピー") { Clipboard.copy(output) }.disabled(output.isEmpty)
                 Spacer()
-                Button("ウィンドウを開く") {
-                    openWindow(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
-                }
+                Button("ウィンドウを開く") { MainWindow.show() }
                 Button("終了") { NSApplication.shared.terminate(nil) }
             }
             Divider()
@@ -72,7 +71,7 @@ struct QuickTranslateView: View {
                     .help(api.statusText)
                 Spacer()
                 if !api.isRunning {
-                    Button("API を開始") { api.ensureRunning() }
+                    Button("API を開始") { api.enableAndStart() }
                         .controlSize(.small)
                 }
                 SettingsLink { Text("設定…") }
@@ -88,10 +87,13 @@ struct QuickTranslateView: View {
         guard !text.isEmpty, !busy else { return }
         busy = true
         error = nil
+        warning = nil
         output = ""
         task = Task {
             do {
-                output = try await model.performTranslation(text: text) { output = $0 }
+                let result = try await model.performTranslation(text: text) { output = $0 }
+                output = result.text
+                warning = result.warning
             } catch is CancellationError {
             } catch {
                 self.error = error.localizedDescription

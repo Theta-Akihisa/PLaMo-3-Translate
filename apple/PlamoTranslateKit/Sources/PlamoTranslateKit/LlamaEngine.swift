@@ -21,13 +21,65 @@ public enum LlamaEngineError: LocalizedError {
     }
 }
 
+/// 生成が終わった理由。
+public enum FinishReason: String, Sendable {
+    /// EOG トークンまたは停止文字列で終わった
+    case stop
+    /// トークン予算（`maxTokens`、またはコンテキストの残り）を使い切った（出力は途中で切れている）
+    case length
+}
+
+/// `LlamaEngine.completeEvents` が流すイベント。
+public enum CompletionEvent: Sendable {
+    /// UTF-8 として完結したテキスト差分（停止文字列は含まない）
+    case text(String)
+    /// 生成の終了。正常終了時に必ず最後に 1 回だけ流れる
+    case finished(FinishReason)
+}
+
+/// 実行中の生成タスクの登録簿（nonisolated な `completeEvents` から使うのでロックで保護する）。
+private final class GenerationRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var closed = false
+    private var tasks: [UUID: Task<Void, Never>] = [:]
+
+    /// 閉じていなければ `make` でタスクを作って登録する（閉じていれば nil）。
+    /// タスク側の `remove` はこのロックを待つので、登録より先に削除されることはない。
+    func start(_ make: (UUID) -> Task<Void, Never>) -> Task<Void, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed else { return nil }
+        let id = UUID()
+        let task = make(id)
+        tasks[id] = task
+        return task
+    }
+
+    func remove(_ id: UUID) {
+        lock.lock()
+        tasks[id] = nil
+        lock.unlock()
+    }
+
+    /// 以降の登録を拒否し、実行中のタスクを返す。
+    func close() -> [Task<Void, Never>] {
+        lock.lock()
+        defer { lock.unlock() }
+        closed = true
+        return Array(tasks.values)
+    }
+}
+
 /// llama.cpp のモデル／コンテキストを 1 つ保持する。actor なのでリクエストは直列化される。
 public actor LlamaEngine {
-    // C ポインタは init で設定後、actor 内からのみ使う（deinit で解放）。
+    // C ポインタは init で設定後、actor 内からのみ使う（shutdown または deinit で解放）。
     private let model: OpaquePointer
     private let ctx: OpaquePointer
     private let vocab: OpaquePointer
     private let sampler: UnsafeMutablePointer<llama_sampler>
+    /// shutdown で C 側のリソースを解放済みか
+    private var released = false
+    private nonisolated let registry = GenerationRegistry()
     public nonisolated let contextLength: Int
 
     /// static let は遅延・スレッドセーフに 1 回だけ評価される。
@@ -69,6 +121,25 @@ public actor LlamaEngine {
     }
 
     deinit {
+        if !released {
+            llama_sampler_free(sampler)
+            llama_free(ctx)
+            llama_model_free(model)
+        }
+    }
+
+    // MARK: - Lifecycle
+
+    /// 実行中・待機中の生成をすべて中止して停止を待ち、llama.cpp のモデル／コンテキストを解放する。
+    /// 以降の生成・トークン数計算は `CancellationError` で失敗する。何度呼んでもよい。
+    /// 戻った時点でモデルのメモリは解放済み（このインスタンスへの参照がどこかに残っていても）。
+    public func shutdown() async {
+        let tasks = registry.close()
+        for t in tasks { t.cancel() }
+        // 待っている間は actor が空くので、実行中・待機中の run はキャンセルを検知して抜けられる
+        for t in tasks { await t.value }
+        guard !released else { return }
+        released = true
         llama_sampler_free(sampler)
         llama_free(ctx)
         llama_model_free(model)
@@ -78,10 +149,11 @@ public actor LlamaEngine {
 
     private func tokenize(_ text: String) throws -> [llama_token] {
         let utf8Count = text.utf8.count
+        guard utf8Count < Int(Int32.max) - 16 else { throw LlamaEngineError.tokenizeFailed }
         var cap = utf8Count + 16
         var buf = [llama_token](repeating: 0, count: cap)
         var n = llama_tokenize(vocab, text, Int32(utf8Count), &buf, Int32(cap), true, true)
-        if n < 0 {
+        if n < 0 && n != Int32.min {   // INT32_MIN はオーバーフロー
             cap = Int(-n)
             buf = [llama_token](repeating: 0, count: cap)
             n = llama_tokenize(vocab, text, Int32(utf8Count), &buf, Int32(cap), true, true)
@@ -104,19 +176,54 @@ public actor LlamaEngine {
 
     // MARK: - Public API
 
-    /// プロンプトを補完し、UTF-8 として完結したテキスト差分を流す。
-    /// ストリームの Task をキャンセル（または購読を終了）すると生成を中断する。
+    /// テキストのトークン数（推論時と同じく BOS を含む）。プロンプトがコンテキストに収まるかの判定に使う。
+    public func tokenCount(of text: String) throws -> Int {
+        guard !released else { throw CancellationError() }
+        return try tokenize(text).count
+    }
+
+    /// プロンプトを補完し、UTF-8 として完結したテキスト差分を `.text` で流す。
+    /// 正常終了時は最後に `.finished` をちょうど 1 回流す。トークン予算（`maxTokens`、または
+    /// コンテキストの残り）を EOG・停止文字列より先に使い切った場合は `.finished(.length)`
+    /// （`maxTokens <= 0` も `.length`）。プロンプト自体が収まらなければ `promptTooLong` を投げる。
+    /// ストリームの購読を終了（またはそのタスクをキャンセル）すると生成を中断する。
+    /// `shutdown()` で中断された場合は `CancellationError` を投げる。
+    public nonisolated func completeEvents(prompt: String, maxTokens: Int, stop: [String]) -> AsyncThrowingStream<CompletionEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let registry = self.registry
+            let task = registry.start { id in
+                Task.detached(priority: .userInitiated) { [self] in
+                    defer { registry.remove(id) }
+                    do {
+                        try await self.run(prompt: prompt, maxTokens: maxTokens, stop: stop) { event in
+                            continuation.yield(event)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+            guard let task else {
+                // shutdown 済み
+                continuation.finish(throwing: CancellationError())
+                return
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// `completeEvents` のテキスト差分だけを流す版（終了理由が不要な場合）。
     /// `prompt + maxTokens` がコンテキストを超える場合は maxTokens を切り詰め、
     /// プロンプト自体が収まらなければ `promptTooLong` を投げる。
     public nonisolated func complete(prompt: String, maxTokens: Int, stop: [String]) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task.detached(priority: .userInitiated) { [self] in
+        let events = completeEvents(prompt: prompt, maxTokens: maxTokens, stop: stop)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
                 do {
-                    try await self.run(prompt: prompt, maxTokens: maxTokens, stop: stop) { delta in
-                        continuation.yield(delta)
+                    for try await event in events {
+                        if case .text(let s) = event { continuation.yield(s) }
                     }
-                    continuation.finish()
-                } catch is CancellationError {
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -126,14 +233,17 @@ public actor LlamaEngine {
         }
     }
 
-    private func run(prompt: String, maxTokens: Int, stop: [String], emit: @Sendable (String) -> Void) throws {
+    private func run(prompt: String, maxTokens: Int, stop: [String], emit: @Sendable (CompletionEvent) -> Void) throws {
+        guard !released else { throw CancellationError() }
+        try Task.checkCancellation()
         var tokens = try tokenize(prompt)
         let nCtx = Int(llama_n_ctx(ctx))
         guard tokens.count + 1 < nCtx else {
             throw LlamaEngineError.promptTooLong(promptTokens: tokens.count, contextLength: nCtx)
         }
         let budget = min(maxTokens, nCtx - tokens.count - 1)
-        guard budget > 0 else { return }
+        // 予算 0 を空の「成功」にしない（打ち切り扱い）
+        guard budget > 0 else { emit(.finished(.length)); return }
 
         // 前回のリクエストの KV を破棄
         llama_memory_clear(llama_get_memory(ctx), true)
@@ -153,38 +263,19 @@ public actor LlamaEngine {
             decoded = end
         }
 
-        var pending = [UInt8]()   // UTF-8 として未完結 or 停止文字列の接頭辞候補のバイト列
-        let stopBytes = stop.map { Array($0.utf8) }
+        var decoder = StopSequenceDecoder(stop: stop)
         var generated = 0
-
-        func flush(final: Bool) -> Bool {
-            // 停止文字列が見つかれば、その手前までを出して true（終了）を返す
-            if let (idx, _) = Self.findStop(in: pending, stops: stopBytes) {
-                let head = Array(pending[..<idx])
-                if !head.isEmpty { emit(String(decoding: head, as: UTF8.self)) }
-                pending.removeAll()
-                return true
-            }
-            // 停止文字列の接頭辞になり得る末尾は保留
-            var hold = final ? 0 : Self.longestStopPrefixSuffix(pending, stops: stopBytes)
-            // 不完全なマルチバイト末尾も保留
-            if !final { hold = max(hold, Self.incompleteUTF8Tail(pending)) }
-            let cut = pending.count - min(hold, pending.count)
-            if cut > 0 {
-                emit(String(decoding: pending[..<cut], as: UTF8.self))
-                pending.removeFirst(cut)
-            }
-            return false
-        }
+        var reason = FinishReason.length
 
         while generated < budget {
             try Task.checkCancellation()
             let token = llama_sampler_sample(sampler, ctx, -1)
-            if llama_vocab_is_eog(vocab, token) { break }
+            if llama_vocab_is_eog(vocab, token) { reason = .stop; break }
             generated += 1
-            pending.append(contentsOf: piece(token))
-            if flush(final: false) { return }
-            if generated >= budget { break }
+            let text = decoder.feed(piece(token))
+            if !text.isEmpty { emit(.text(text)) }
+            if decoder.isStopped { emit(.finished(.stop)); return }
+            if generated >= budget { break }   // 予算切れ（reason は .length のまま）
 
             var t = token
             let rc: Int32 = withUnsafeMutablePointer(to: &t) { p in
@@ -192,50 +283,9 @@ public actor LlamaEngine {
             }
             if rc != 0 { throw LlamaEngineError.decodeFailed(rc) }
         }
-        _ = flush(final: true)
-    }
-
-    // MARK: - Buffer helpers (pure)
-
-    static func findStop(in bytes: [UInt8], stops: [[UInt8]]) -> (Int, Int)? {
-        var best: (Int, Int)? = nil
-        for (si, s) in stops.enumerated() where !s.isEmpty && bytes.count >= s.count {
-            for i in 0...(bytes.count - s.count) where Array(bytes[i..<(i + s.count)]) == s {
-                if best == nil || i < best!.0 { best = (i, si) }
-                break
-            }
-        }
-        return best
-    }
-
-    /// bytes の末尾が、いずれかの停止文字列の（真の）接頭辞と一致する最大長。
-    static func longestStopPrefixSuffix(_ bytes: [UInt8], stops: [[UInt8]]) -> Int {
-        var best = 0
-        for s in stops where s.count > 1 {
-            let maxK = min(s.count - 1, bytes.count)
-            if maxK <= best { continue }
-            for k in stride(from: maxK, to: best, by: -1) where Array(bytes[(bytes.count - k)...]) == Array(s[..<k]) {
-                best = k
-                break
-            }
-        }
-        return best
-    }
-
-    /// 末尾の不完全な UTF-8 シーケンスのバイト数（0 なら完結）。
-    static func incompleteUTF8Tail(_ bytes: [UInt8]) -> Int {
-        var i = bytes.count - 1
-        var cont = 0
-        while i >= 0 && cont < 3 && (bytes[i] & 0xC0) == 0x80 { cont += 1; i -= 1 }
-        guard i >= 0 else { return 0 }
-        let lead = bytes[i]
-        let need: Int
-        if lead & 0x80 == 0 { need = 1 }
-        else if lead & 0xE0 == 0xC0 { need = 2 }
-        else if lead & 0xF0 == 0xE0 { need = 3 }
-        else if lead & 0xF8 == 0xF0 { need = 4 }
-        else { return 0 }
-        return (cont + 1) < need ? cont + 1 : 0
+        let rest = decoder.flush()
+        if !rest.isEmpty { emit(.text(rest)) }
+        emit(.finished(reason))
     }
 }
 #endif

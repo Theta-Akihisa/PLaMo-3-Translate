@@ -9,7 +9,9 @@ import { startMock } from './mock-server.mjs';
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
 const here = path.dirname(fileURLToPath(import.meta.url));
-const ext = path.resolve(here, '../dist');
+// E2E 用ビルド (node build.mjs --e2e): ページ内 UI の shadow root が open (本番の dist/ は closed)
+const ext = path.resolve(here, '../dist-e2e');
+const prodDist = path.resolve(here, '../dist');
 const vectors = JSON.parse(fs.readFileSync(path.resolve(here, '../../shared/pfml3-test-vectors.json'), 'utf8')).vectors;
 const prompt = (name) => vectors.find((v) => v.name === name).prompt;
 
@@ -378,8 +380,10 @@ await test('content: selection icon -> card (streamed), target select, replace i
   if (process.env.E2E_DEBUG) console.log('DUMP', await page.evaluate(() => document.querySelector('[data-plamo-translate]')?.shadowRoot.querySelector('.panel .body')?.textContent), JSON.stringify(await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings)), mock.requests.length);
   await page.waitForFunction(() => document.querySelector('[data-plamo-translate]').shadowRoot.querySelector('.panel .body')?.textContent.includes('会議は来週の月曜日に変更されました。'), null, { timeout: 15000 });
   await page.screenshot({ path: path.join(SHOTS, 'page-panel.png') });
-  // 翻訳先を変更 -> 再翻訳
-  await page.locator('[data-plamo-translate] .panel select').first().selectOption('en');
+  // 翻訳先を変更 -> 再翻訳 (UI は isTrusted のイベントにしか反応しないので、キーボードで選ぶ: ja の次が en)
+  await page.locator('[data-plamo-translate] .panel select').first().focus();
+  await page.keyboard.press('ArrowDown');
+  eq(await page.locator('[data-plamo-translate] .panel select').first().inputValue(), 'en', 'target select');
   await page.waitForFunction(() => document.querySelector('[data-plamo-translate]').shadowRoot.querySelector('.panel .body')?.textContent.includes('完了') || document.querySelector('[data-plamo-translate]').shadowRoot.querySelector('.panel .foot')?.textContent.includes('完了'), null, { timeout: 15000 });
   await sleep(500);
   assert(mock.requests.at(-1).prompt.includes('<|plamo:val|>en<|plamo:msg|>'), 'en target after change');
@@ -457,6 +461,169 @@ await test('content: page translation cancel via toolbar stops queue', async () 
   await sleep(800);
   assert(mock.state.aborted >= 1, 'in-flight aborted');
   await page.close();
+});
+
+const TRUNCATED_WARNING = '訳文が長さの上限で途中で切れています。設定の最大トークン数を増やすか、文を分けてください。';
+/** content script にページ翻訳の操作を送り、応答 (PageState) を返す */
+const pageAction = (u, action) => sw.evaluate(async ({ u, action }) => {
+  const tab = (await chrome.tabs.query({})).filter((t) => t.url === u).at(-1);
+  return chrome.tabs.sendMessage(tab.id, { type: 'page-translate', action });
+}, { u, action });
+const barProg = (page) => page.evaluate(() => document.querySelector('[data-plamo-translate]')?.shadowRoot.querySelector('.bar .prog')?.textContent ?? '');
+
+await test('content: page translation skips bad paragraphs (HTTP 400 / input error / truncated) and finishes the rest', async () => {
+  await setSettings({ backend: 'server', endpoint: base, sourceLang: 'auto', targetLang: 'ja', form: 'none' });
+  const url = `${base}/page.html`;
+  const page = await ctx.newPage();
+  await page.goto(url);
+  await page.evaluate(() => {
+    document.getElementById('p4').textContent = 'BADPARA This paragraph is rejected by the server.';
+    for (const [id, t] of [
+      ['p5', 'The token <|plamo:tag|> is reserved by the prompt format.'],
+      ['p6', 'LONG paragraph whose translation hits the token limit.'],
+      ['p7', 'This last paragraph is fine.'],
+    ]) {
+      const p = document.createElement('p');
+      p.id = id;
+      p.textContent = t;
+      document.body.appendChild(p);
+    }
+  });
+  mock.requests.length = 0;
+  await pageAction(url, 'start');
+  await page.waitForFunction(() => /翻訳済み/.test(document.querySelector('[data-plamo-translate]')?.shadowRoot.querySelector('.bar .prog')?.textContent ?? ''), null, { timeout: 30000 });
+  const prog = await barProg(page);
+  assert(prog.includes('3 段落をスキップ'), 'skip count in toolbar: ' + prog);
+  eq(await page.textContent('#p1'), '会議は来週の月曜日に変更されました。');
+  eq(await page.textContent('#p7'), '【訳】This last paragraph is fine.', 'paragraphs after the bad ones translated');
+  eq(await page.textContent('#p4'), 'BADPARA This paragraph is rejected by the server.', '400 paragraph left as is');
+  eq(await page.textContent('#p5'), 'The token <|plamo:tag|> is reserved by the prompt format.', 'input-error paragraph left as is');
+  eq(await page.textContent('#p6'), 'LONG paragraph whose translation hits the token limit.', 'truncated translation not applied');
+  assert(!mock.requests.some((r) => r.prompt.includes('is reserved by the prompt format')), 'input error never sent');
+  assert(mock.requests.some((r) => lastInputOf(r.prompt).startsWith('LONG')), 'LONG paragraph was requested');
+  assert(!mock.requests.some((r) => r.prompt.includes('【途中】')), 'truncated output never used as history');
+  const st = await pageAction(url, 'state');
+  eq(st.mode, 'translated'); eq(st.skipped, 3);
+  const title = await page.evaluate(() => document.querySelector('[data-plamo-translate]').shadowRoot.querySelector('.bar .prog').title);
+  for (const t of ['入力エラー: 1 段落', '長さの上限で途中で切れた: 1 段落', '\nエラー: 1 段落']) assert(title.includes(t), `tooltip has "${t.trim()}": ${title}`);
+  await page.screenshot({ path: path.join(SHOTS, 'page-skipped.png') });
+  // ページのスクリプトが合成したクリック (isTrusted = false) では「原文に戻す」は動かない
+  await page.evaluate(() => [...document.querySelector('[data-plamo-translate]').shadowRoot.querySelectorAll('.bar button')].find((b) => b.textContent === '原文に戻す').click());
+  await sleep(300);
+  eq(await page.textContent('#p1'), '会議は来週の月曜日に変更されました。', 'synthetic click ignored');
+  // 閉じる: ツールバーだけ消え、訳文は残る
+  await page.locator('[data-plamo-translate] .bar button.x').click();
+  await page.locator('[data-plamo-translate] .bar').waitFor({ state: 'detached', timeout: 3000 });
+  eq(await page.textContent('#p1'), '会議は来週の月曜日に変更されました。', 'translation kept after closing the toolbar');
+  await page.close();
+});
+
+await test('content: page translation with the app not running shows the error in the toolbar; 再試行 resumes', async () => {
+  const port = await freePort();
+  await setSettings({ backend: 'app', appEndpoint: `http://127.0.0.1:${port}` });
+  const url = `${base}/page.html`;
+  const page = await ctx.newPage();
+  let appMock;
+  try {
+    await page.goto(url);
+    await pageAction(url, 'start');
+    const bar = page.locator('[data-plamo-translate] .bar.error');
+    await bar.waitFor({ timeout: 10000 });
+    const txt = await bar.locator('.prog').textContent();
+    assert(txt.includes('macOS アプリが起動していません'), 'toolbar error: ' + txt);
+    eq(await bar.locator('button', { hasText: '再試行' }).isVisible(), true, 'retry visible');
+    eq(await bar.locator('button.x').isVisible(), true, 'close visible');
+    eq(await bar.locator('button', { hasText: '翻訳を停止' }).isVisible(), false, 'stop hidden');
+    const st = await pageAction(url, 'state');
+    eq(st.mode, 'idle'); assert(st.error?.includes('起動していません'), 'state error: ' + st.error);
+    eq(await page.textContent('#p1'), 'The meeting has been rescheduled to next Monday.', 'nothing applied');
+    await page.screenshot({ path: path.join(SHOTS, 'page-app-down.png') });
+    appMock = await startMock({ port }); // アプリを起動した
+    await bar.locator('button', { hasText: '再試行' }).click();
+    await page.waitForFunction(() => document.getElementById('p4').textContent.startsWith('【訳】'), null, { timeout: 30000 });
+    eq(await page.textContent('#p1'), '会議は来週の月曜日に変更されました。');
+    await page.waitForFunction(() => /翻訳済み/.test(document.querySelector('[data-plamo-translate]').shadowRoot.querySelector('.bar .prog')?.textContent ?? ''), null, { timeout: 5000 });
+    eq(await page.locator('[data-plamo-translate] .bar.error').count(), 0, 'error state cleared');
+  } finally {
+    await page.close();
+    await appMock?.close();
+    await setSettings({ backend: 'server', endpoint: base });
+  }
+});
+
+await test('content: nothing to translate -> notice in the toolbar (not a silent no-op)', async () => {
+  const url = `${base}/page.html`;
+  const page = await ctx.newPage();
+  await page.goto(url);
+  await page.evaluate(() => { document.body.innerHTML = '<p>これは日本語だけのページです。翻訳するものはありません。</p>'; });
+  const st = await pageAction(url, 'start');
+  eq(st.mode, 'translating', 'start acknowledged');
+  await page.waitForFunction(() => /翻訳対象のテキストが見つかりませんでした/.test(document.querySelector('[data-plamo-translate]')?.shadowRoot.querySelector('.bar .prog')?.textContent ?? ''), null, { timeout: 5000 });
+  eq((await pageAction(url, 'state')).error, '翻訳対象のテキストが見つかりませんでした');
+  await page.locator('[data-plamo-translate] .bar button.x').click();
+  await page.locator('[data-plamo-translate] .bar').waitFor({ state: 'detached', timeout: 3000 });
+  await page.close();
+});
+
+await test('content: untrusted (page-synthesized) events do not drive the in-page UI', async () => {
+  await setSettings({ showSelectionIcon: true });
+  const page = await ctx.newPage();
+  await page.goto(`${base}/page.html`);
+  await sleep(300);
+  // ページのスクリプトが選択して mouseup / keyup を合成しても選択アイコンは出ない
+  await page.evaluate(() => {
+    window.getSelection().selectAllChildren(document.getElementById('p1'));
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: 50, clientY: 50 }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', shiftKey: true, bubbles: true }));
+  });
+  await sleep(400);
+  eq(await page.locator('[data-plamo-translate] .sel-icon').isVisible().catch(() => false), false, 'icon not shown for synthetic events');
+  // 本物の操作では出る。合成クリックではカードは開かない
+  await page.locator('#p1').click({ clickCount: 3 });
+  const icon = page.locator('[data-plamo-translate] .sel-icon');
+  await icon.waitFor({ state: 'visible', timeout: 5000 });
+  await page.evaluate(() => document.querySelector('[data-plamo-translate]').shadowRoot.querySelector('.sel-icon').click());
+  await sleep(400);
+  eq(await page.locator('[data-plamo-translate] .panel').count(), 0, 'synthetic click on the icon ignored');
+  await page.close();
+});
+
+await test('content: truncated result in the selection card shows the partial text + warning', async () => {
+  const page = await ctx.newPage();
+  await page.goto(`${base}/page.html`);
+  await page.evaluate(() => { document.getElementById('p1').textContent = 'LONG paragraph whose translation hits the token limit.'; });
+  await page.locator('#p1').click({ clickCount: 3 });
+  const icon = page.locator('[data-plamo-translate] .sel-icon');
+  await icon.waitFor({ state: 'visible', timeout: 5000 });
+  await icon.click();
+  const warn = page.locator('[data-plamo-translate] .panel .warn');
+  await warn.waitFor({ state: 'visible', timeout: 15000 });
+  eq(await warn.textContent(), TRUNCATED_WARNING);
+  eq(await page.locator('[data-plamo-translate] .panel .body').textContent(), '【途中】長い訳文の途中まで', 'partial text shown');
+  await page.screenshot({ path: path.join(SHOTS, 'page-panel-truncated.png') });
+  await page.close();
+});
+
+await test('popup: truncated translation (finish_reason "length") shows partial text + warning', async () => {
+  const p = await openPopup();
+  await p.selectOption('#sourceLang', 'en');
+  await p.fill('#input', 'LONG text that would need more tokens.');
+  await p.waitForFunction(() => !document.getElementById('warn').hidden, null, { timeout: 15000 });
+  eq(await p.textContent('#warn'), TRUNCATED_WARNING);
+  eq(await p.textContent('#output'), '【途中】長い訳文の途中まで', 'partial text shown');
+  await p.screenshot({ path: path.join(SHOTS, 'popup-truncated.png') });
+  // 通常の翻訳では警告が消える
+  await p.fill('#input', 'Hello again.');
+  await p.waitForFunction(() => document.getElementById('output').textContent.includes('【訳】Hello again.') && document.getElementById('warn').hidden, null, { timeout: 15000 });
+  await p.close();
+});
+
+await test('build: production dist/ uses a closed shadow root (the e2e hook is only in dist-e2e/)', async () => {
+  const prod = fs.readFileSync(path.join(prodDist, 'content.js'), 'utf8');
+  assert(/attachShadow\(\{\s*mode:\s*"closed"\s*\}\)/.test(prod), 'closed shadow root in dist/content.js');
+  assert(!/mode:\s*"open"/.test(prod), 'no open shadow root in dist/content.js');
+  const e2eBuild = fs.readFileSync(path.join(ext, 'content.js'), 'utf8');
+  assert(/attachShadow\(\{\s*mode:\s*"open"\s*\}\)/.test(e2eBuild), 'dist-e2e opens the shadow root');
 });
 
 function lastInputOf(p) { const i = p.lastIndexOf('<|plamo:tag|>input'); const r = p.slice(i); const m = r.indexOf('<|plamo:msg|>'); return r.slice(m + 13, r.indexOf('<|plamo:tag|>output')); }

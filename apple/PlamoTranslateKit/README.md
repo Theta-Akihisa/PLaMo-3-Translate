@@ -29,20 +29,55 @@ TranslationSettings                          // Codable。makeRequest(text:histo
 // Kit
 let store = ModelStore()                     // @MainActor, ObservableObject
 try await store.download(spec.defaultFile)   // store.downloads[file.file] で進捗 (.downloading(progress:)/.verifying/.failed)
-store.cancelDownload(file); try store.delete(file)
+store.cancelDownload(file); try store.delete(file)   // 呼び出し元タスクのキャンセルでも中止できる
 try await store.importLocalFile(url:)        // 既存 GGUF を取り込む
 
 let translator = Translator(store: store)    // @MainActor, ObservableObject
 try await translator.load(model: spec, quant: nil, contextLength: 8192)
+translator.unload()
 for try await delta in translator.translate(request, maxTokens: 2048) { ... }  // 差分ストリーム
+try await translator.translateOnce(request)                                    // 全文
 for try await p in translator.translateDocument(text: t, settings: s) { p.text }  // 段落ごと＋履歴つき
 Translator.recommendedModels() / Translator.memoryWarning(for:)
+
+// 低レベル（ローカル API など）
+let engine = translator.engine!              // LlamaEngine（actor）
+for try await e in engine.completeEvents(prompt: p, maxTokens: n, stop: PFML3.stopStrings) {
+    switch e {
+    case .text(let delta): ...
+    case .finished(let reason): ...          // FinishReason.stop / .length
+    }
+}
+engine.complete(prompt:maxTokens:stop:)      // テキスト差分のみ（終了理由なし）
+try await engine.tokenCount(of: text)        // BOS を含むトークン数
 ```
 
 - エンジンへのリクエストは `LlamaEngine`（actor）で直列化されます。UI と HTTP API から同時に呼んで構いません。
 - ストリームを購読するタスクをキャンセル（または break）すると生成が中断されます。
 - 生成は greedy（temperature 0）。`<|plamo:tag|>` / `<|plamo:bos|>` または EOG で停止します。
 - `prompt + maxTokens` がコンテキストを超える場合は `maxTokens` を自動で切り詰め、プロンプト自体が収まらない場合は `LlamaEngineError.promptTooLong`。
+
+### 出力の打ち切り（`FinishReason.length`）
+
+- `completeEvents` は正常終了時に最後に `.finished` をちょうど 1 回流します。EOG・停止文字列より先にトークン予算
+  （`maxTokens` またはコンテキストの残り）を使い切ると `.length` です（`maxTokens <= 0` も `.length`）。
+- `Translator.translate` は全差分を流したあと `TranslatorError.outputTruncated` を投げて終わります。`translateOnce` も同様です。
+- `translateDocument` は打ち切られた段落の途中までの訳を残して次の段落へ進み、`DocumentProgress.truncatedParagraphs` で件数を報告します
+  （その段落は history に加えません）。
+
+### history とコンテキスト長
+
+`translate` / `translateDocument` は、プロンプト + 生成用の予約（原文トークン数 × 2 + 64、最低 256、上限 `maxTokens`）が
+コンテキストに収まるよう、history を古いものから削ります（`PromptBudget.fitHistory`）。history を全て削っても
+原文自体が収まらない場合は `LlamaEngineError.promptTooLong` です。
+
+### モデルの読み込み・解放
+
+- `load` は、ファイルが無ければ現在のモデルを残したまま `TranslatorError.modelNotInstalled` を投げます。
+- `load` / `unload` は直列化され、後から呼んだものが優先されます。追い越された `load` は `CancellationError` を投げます。
+- 新しいモデルを読み込む前に、旧エンジンの生成（`engine.complete*` を直接使うものも含む）を中止して停止を待ち、
+  メモリを解放します（`LlamaEngine.shutdown()`）。2 つのモデルが同時にメモリに載ることはありません。
+  中止された生成のストリームは `CancellationError` で終わります。
 
 ## llama.cpp の固定（pin）
 
@@ -63,6 +98,8 @@ slice は `macos-arm64_x86_64` と `ios-arm64` のみです。
 - メモリ目安（コンテキスト 8192、Q4_K_M。**あくまで推定値**）: 0.8B 約 1 GB / 2B 約 2.5 GB / 8B 約 6.5 GB。
   iPhone で 8B は強制終了の恐れがあるため `Translator.memoryWarning(for:)` で警告してください。
 - モデルは `Application Support/PlamoTranslate/Models` に保存され、iCloud バックアップ対象外です。ダウンロードは SHA-256 検証後に配置します。
+  途中の一時ファイル（`.download-*` / `.import-*`）は失敗・中止時に削除し、`ModelStore` の初期化時にも残骸を掃除します。
+  中止したダウンロードの再開データは `.partial/<sha256>.resume` に保存されます。
 
 ## 共有データの同期とテスト
 

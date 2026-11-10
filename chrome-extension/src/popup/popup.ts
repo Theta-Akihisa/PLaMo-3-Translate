@@ -2,7 +2,14 @@ import { TARGET_LANGUAGES, LANGUAGES, formatBytes } from '../core/catalog';
 import { loadSettings, saveSettings, type Settings } from '../core/settings';
 import { translateStream, getEngineStatus, TranslateCancelled, type TranslateHandle } from '../core/client';
 import { detectLanguage, smartTarget, langJa } from '../core/detect';
-import type { AppModelsResult, AppSelectResult, EngineStatus, PageState, RuntimeMessage } from '../core/protocol';
+import {
+  TRUNCATED_WARNING,
+  type AppModelsResult,
+  type AppSelectResult,
+  type EngineStatus,
+  type PageState,
+  type RuntimeMessage,
+} from '../core/protocol';
 import { statusSummary } from '../core/status-view';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -10,6 +17,7 @@ const sourceSel = $<HTMLSelectElement>('sourceLang');
 const targetSel = $<HTMLSelectElement>('targetLang');
 const input = $<HTMLTextAreaElement>('input');
 const output = $('output');
+const warnEl = $('warn');
 const meta = $('meta');
 const translateBtn = $<HTMLButtonElement>('translate');
 const stopBtn = $<HTMLButtonElement>('stop');
@@ -50,7 +58,13 @@ function updateFormRow() {
   formRow.hidden = targetSel.value !== 'ja';
 }
 
+function setWarning(text: string) {
+  warnEl.textContent = text;
+  warnEl.hidden = !text;
+}
+
 function setOutput(text: string, kind: 'empty' | 'ok' | 'err' = 'ok') {
+  if (kind !== 'ok') setWarning('');
   output.textContent = text;
   output.className = 'output' + (kind === 'ok' ? '' : ` ${kind}`);
   copyBtn.disabled = kind !== 'ok' || !text;
@@ -172,6 +186,7 @@ async function doTranslate() {
   }
   meta.textContent = '';
   setOutput('準備中…', 'empty');
+  setWarning('');
   const t0 = Date.now();
   const h = translateStream(
     { text, sourceLang: source, targetLang: target, form: target === 'ja' ? formValue() : 'none' },
@@ -194,6 +209,8 @@ async function doTranslate() {
     if (seq !== runSeq) return;
     lastResult = r.text;
     setOutput(r.text || '(翻訳結果が空でした)', r.text ? 'ok' : 'empty');
+    // 最大トークン数で途中で切れた: 途中までの訳文を表示したまま警告する
+    setWarning(r.truncated ? TRUNCATED_WARNING : '');
     meta.textContent = `${((Date.now() - t0) / 1000).toFixed(1)} 秒`;
   } catch (e) {
     if (seq !== runSeq) return;
@@ -212,10 +229,13 @@ async function doTranslate() {
   }
 }
 
-async function activeTabId(): Promise<number | undefined> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tab?.id;
+/** ポップアップを開いたときのアクティブなタブ (ポップアップが開いている間は変わらない) */
+let activeTab: Promise<number | undefined> | null = null;
+function activeTabId(): Promise<number | undefined> {
+  activeTab ??= chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => tab?.id);
+  return activeTab;
 }
+let activeTabCached: number | undefined;
 
 async function sendPage(action: 'start' | 'restore' | 'cancel' | 'toggle' | 'state'): Promise<PageState | null> {
   const id = await activeTabId();
@@ -228,6 +248,7 @@ async function sendPage(action: 'start' | 'restore' | 'cancel' | 'toggle' | 'sta
 }
 
 function renderPage(st: PageState | null) {
+  const skipped = st?.skipped ? `（${st.skipped} 段落をスキップ）` : '';
   if (!st) {
     pageStateEl.textContent = 'このページでは使えません';
     pageBtn.disabled = true;
@@ -237,17 +258,18 @@ function renderPage(st: PageState | null) {
   pageBtn.disabled = false;
   if (st.mode === 'translating') {
     pageBtn.textContent = '停止';
-    pageStateEl.textContent = `${st.done}/${st.total}`;
+    pageStateEl.textContent = `${st.done}/${st.total}${skipped}`;
     pageRestoreBtn.hidden = false;
   } else if (st.mode === 'translated') {
     pageBtn.textContent = 'もう一度翻訳';
-    pageStateEl.textContent = `翻訳済み ${st.done}/${st.total}`;
+    pageStateEl.textContent = `翻訳済み ${st.done}/${st.total}${skipped}${st.error ? ` — エラー: ${st.error}` : ''}`;
     pageRestoreBtn.hidden = false;
   } else {
     pageBtn.textContent = 'このページを翻訳';
-    pageStateEl.textContent = st.error ?? '';
+    pageStateEl.textContent = st.error ? (st.skipped ? `${st.error}${skipped}` : st.error) : st.skipped ? `${st.skipped} 段落をスキップ` : '';
     pageRestoreBtn.hidden = true;
   }
+  pageStateEl.title = pageStateEl.textContent ?? '';
 }
 
 async function init() {
@@ -358,9 +380,11 @@ async function init() {
     if (!lastStatus || lastStatus.launching || lastStatus.backend === 'wasm') return;
     if (lastStatus.state !== 'ready') void refreshStatus();
   }, 3000);
-  chrome.runtime.onMessage.addListener((msg: RuntimeMessage) => {
+  activeTabCached = await activeTabId();
+  chrome.runtime.onMessage.addListener((msg: RuntimeMessage, sender) => {
     if (msg.type === 'engine-status' && msg.status.backend === settings.backend) renderStatus(msg.status);
-    else if (msg.type === 'page-state') renderPage(msg.state);
+    // 他のタブのページ翻訳の進捗は無視する
+    else if (msg.type === 'page-state' && sender.tab?.id !== undefined && sender.tab.id === activeTabCached) renderPage(msg.state);
   });
 
   // ページで選択中のテキストがあれば入力欄に入れる

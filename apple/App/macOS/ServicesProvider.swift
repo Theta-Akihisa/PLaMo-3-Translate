@@ -52,16 +52,10 @@ final class ResultPanelController {
         panel = nil
     }
 
-    /// パネルを閉じてメインウィンドウを前面に出す。ウィンドウが閉じられていれば開き直す
+    /// パネルを閉じてメインウィンドウを前面に出す。ウィンドウが閉じられていれば SwiftUI の openWindow で開き直す
     func openMainWindow() {
         close()
-        NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: { !($0 is NSPanel) && $0.canBecomeMain }) {
-            window.makeKeyAndOrderFront(nil)
-        } else if let url = URL(string: "plamotranslate://open") {
-            // メインウィンドウが無い場合は URL スキーム経由で WindowGroup に新しいウィンドウを作らせる
-            NSWorkspace.shared.open(url)
-        }
+        MainWindow.show()
     }
 
     /// ユーザーがパネルの大きさを手で変えたら、以降は自動で広げない
@@ -202,6 +196,8 @@ struct ServiceResultView: View {
     var targetIdealHeight: CGFloat = 120
     @State private var output = ""
     @State private var error: String?
+    /// 訳文が長さの上限で途中で切れたときの警告（途中までの訳文は表示したまま）
+    @State private var warning: String?
     @State private var busy = true
     @State private var task: Task<Void, Never>?
 
@@ -229,6 +225,7 @@ struct ServiceResultView: View {
                     ScrollView {
                         VStack(alignment: .leading) {
                             if let error { Text(error).foregroundStyle(.red) }
+                            if let warning { Label(warning, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.callout) }
                             Text(output).translationTextFont().textSelection(.enabled)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -241,7 +238,7 @@ struct ServiceResultView: View {
             Divider()
             HStack {
                 Button("メインウィンドウで開く") {
-                    model.translate(externalText: source)
+                    model.translate(externalText: source, from: "クイック翻訳パネル")
                     ResultPanelController.shared.openMainWindow()
                 }
                 Spacer()
@@ -254,7 +251,9 @@ struct ServiceResultView: View {
         .onAppear {
             task = Task {
                 do {
-                    output = try await model.performTranslation(text: source) { output = $0 }
+                    let result = try await model.performTranslation(text: source) { output = $0 }
+                    output = result.text
+                    warning = result.warning
                 } catch is CancellationError {
                 } catch {
                     self.error = error.localizedDescription

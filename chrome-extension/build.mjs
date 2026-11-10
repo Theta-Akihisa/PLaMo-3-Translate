@@ -4,11 +4,22 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const dist = join(root, 'dist');
+// --e2e: Playwright E2E 用ビルド (dist-e2e/)。ページ内 UI の shadow root を open にする (__E2E__)。
+// 配布用の dist/ には決して含めない。
+const e2e = process.argv.includes('--e2e');
+const dist = join(root, e2e ? 'dist-e2e' : 'dist');
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 
-const common = { bundle: true, target: 'chrome116', sourcemap: false, logLevel: 'info', legalComments: 'none', minify: process.env.NO_MINIFY ? false : true };
+const common = {
+  bundle: true,
+  target: 'chrome116',
+  sourcemap: false,
+  logLevel: 'info',
+  legalComments: 'none',
+  minify: process.env.NO_MINIFY ? false : true,
+  define: { __E2E__: JSON.stringify(e2e) },
+};
 const src = (p) => join(root, 'src', p);
 
 await Promise.all([

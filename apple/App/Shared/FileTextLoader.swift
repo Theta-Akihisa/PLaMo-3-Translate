@@ -56,8 +56,9 @@ enum FileTextLoader {
     }
 
     /// バックグラウンドで読み込む。`progress` は PDF のページ処理の進み具合（0...1）。
+    /// 呼び出し元の Task をキャンセルすると、バックグラウンドの処理もページ単位で止まる。
     static func load(url: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws -> Result {
-        try await Task.detached(priority: .userInitiated) {
+        let work = Task.detached(priority: .userInitiated) { () throws -> Result in
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let ext = url.pathExtension.lowercased()
@@ -76,7 +77,13 @@ enum FileTextLoader {
                         ?? String(data: data, encoding: .japaneseEUC) else { throw LoadError.unreadable }
                 return try nonEmpty(Result(text: text, fileName: name))
             }
-        }.value
+        }
+        // Task.detached は呼び出し元のキャンセルを引き継がないので、明示的に伝える
+        return try await withTaskCancellationHandler {
+            try await work.value
+        } onCancel: {
+            work.cancel()
+        }
     }
 
     private static func nonEmpty(_ r: Result) throws -> Result {
@@ -100,6 +107,7 @@ enum FileTextLoader {
                 raw = ocr
                 ocrPages += 1
             }
+            try Task.checkCancellation()   // 文字認識は 1 ページに数秒かかることがある
             let text = PDFTextReflow.paragraphs(fromPageText: raw)
             if !text.isEmpty { pages.append(text) }
             progress?(Double(i + 1) / Double(max(doc.pageCount, 1)))
@@ -108,12 +116,20 @@ enum FileTextLoader {
                                    pageCount: doc.pageCount, ocrPageCount: ocrPages))
     }
 
+    /// 文字認識用に描画するページ画像の長辺の上限（px）
+    static let maxOCRLongSide: CGFloat = 4000
+
     /// Vision でページ画像を文字認識し、上から順に行を並べたテキストを返す
     private static func recognizeText(on page: PDFPage) -> String? {
-        let bounds = page.bounds(for: .mediaBox)
-        // 長辺がおよそ 2000px 以上になる解像度で描画（小さい文字も認識できるように）
-        let scale = max(2.0, 2000 / max(bounds.width, bounds.height, 1))
-        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        var bounds = page.bounds(for: .mediaBox)
+        if page.rotation % 180 != 0 { bounds.size = CGSize(width: bounds.height, height: bounds.width) }
+        // 長辺がおよそ 2000px 以上になる解像度で描画（小さい文字も認識できるように）。
+        // ただし巨大なページでメモリを使い過ぎないよう、長辺は 4000px までにする
+        let longSide = max(bounds.width, bounds.height, 1)
+        let scale = min(max(2.0, 2000 / longSide), maxOCRLongSide / longSide)
+        // thumbnail は画面の倍率（Retina では 2〜3 倍）のビットマップを作るので、その分だけ小さく頼む
+        let pixelScale = thumbnailPixelScale(page)
+        let size = CGSize(width: bounds.width * scale / pixelScale, height: bounds.height * scale / pixelScale)
         guard let cg = cgImage(page.thumbnail(of: size, for: .mediaBox)) else { return nil }
 
         let request = VNRecognizeTextRequest()
@@ -129,6 +145,16 @@ enum FileTextLoader {
             .sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }   // Vision の座標は左下原点
             .compactMap { $0.topCandidates(1).first?.string }
         return lines.joined(separator: "\n")
+    }
+
+    /// page.thumbnail が実際に描くビットマップの倍率（1 ポイントあたりのピクセル数）
+    private static func thumbnailPixelScale(_ page: PDFPage) -> CGFloat {
+        let probeSide: CGFloat = 32
+        guard let probe = cgImage(page.thumbnail(of: CGSize(width: probeSide, height: probeSide), for: .mediaBox)) else {
+            return 1
+        }
+        // アスペクト比を保って枠に収めるので、長辺で比べる
+        return max(1, CGFloat(max(probe.width, probe.height)) / probeSide)
     }
 
     #if canImport(UIKit)

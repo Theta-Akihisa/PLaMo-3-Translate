@@ -182,10 +182,15 @@ export function startMock({ modelFiles = {}, port = 0 } = {}) {
       if (!app.installed.has(app.active)) return notInstalled(res, activeEntry(), cors);
       app.loaded = true;
       requests.push({ ...j, origin: origin ?? null });
-      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', ...cors });
       const text = lastInput(j.prompt);
+      // BADPARA を含む段落だけ 400 で拒否する (ページ翻訳のスキップのテスト用)
+      if (text.includes('BADPARA')) return apiError(res, 400, 'invalid_request', 'この段落は処理できません (テスト)', cors);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', ...cors });
       let out = DICT[text] ?? `【訳】${text}`;
       let delay = 25;
+      // LONG で始まる入力は max_tokens に達したことにする (finish_reason: "length")
+      let finish = 'stop';
+      if (text.startsWith('LONG')) { out = '【途中】長い訳文の途中まで'; finish = 'length'; }
       if (text.startsWith('SLOW')) { out = 'あ'.repeat(200); delay = 100; }
       const chars = [...out];
       let i = 0;
@@ -194,7 +199,7 @@ export function startMock({ modelFiles = {}, port = 0 } = {}) {
       const tick = () => {
         if (closed) return;
         if (i >= chars.length) {
-          res.write(`data: ${JSON.stringify({ choices: [{ text: '', index: 0, finish_reason: 'stop' }] })}\n\n`);
+          res.write(`data: ${JSON.stringify({ choices: [{ text: '', index: 0, finish_reason: finish }] })}\n\n`);
           res.write('data: [DONE]\n\n');
           state.completed++;
           closed = true;

@@ -50,6 +50,8 @@ textarea:focus, select:focus { outline: 2px solid color-mix(in srgb, var(--accen
 }
 .output.empty { color: var(--muted); }
 .output.err { color: var(--err); }
+.warn { margin: 0 12px 4px; padding: 6px 8px; border-radius: 6px; font-size: 12px; line-height: 1.5;
+  color: color-mix(in srgb, var(--warn) 60%, var(--fg)); background: color-mix(in srgb, var(--warn) 14%, transparent); }
 .output-wrap .small { position: absolute; right: 8px; bottom: 8px; }
 .page { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 [hidden] { display: none !important; }

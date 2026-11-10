@@ -45,6 +45,9 @@ final class LocalAPIController: ObservableObject {
     }
 
     @Published private(set) var status: Status = .stopped
+    /// Chrome 拡張機能が `plamotranslate://open` で接続を求めたが、API が設定でオフになっている。
+    /// 勝手にオンにはせず、メインウィンドウで確認する（「API をオンにする」）。
+    @Published var connectionRequestPending = false
     private lazy var server = LocalAPIServer(backend: AppModel.shared)
 
     var isRunning: Bool {
@@ -80,12 +83,26 @@ final class LocalAPIController: ObservableObject {
         apply(enabled: APISettings.storedEnabled, port: APISettings.storedPort)
     }
 
-    /// 拡張機能から `plamotranslate://open` で呼ばれたときなど、サーバを確実に待ち受け状態にする。
-    /// オフに設定されていた場合も、拡張機能から明示的に起動されたのでオンにする。
-    func ensureRunning() {
-        if !APISettings.storedEnabled {
-            UserDefaults.standard.set(true, forKey: APISettings.enabledKey)   // @AppStorage にも反映される
+    /// 拡張機能から `plamotranslate://open` で呼ばれた。オン/オフの設定は変えない。
+    /// オンなら（止まっていれば）待ち受けを再開する。オフなら確認の案内を出す（`connectionRequestPending`）。
+    /// - Returns: 案内を出した（API がオフだった）
+    @discardableResult
+    func handleOpenRequest() -> Bool {
+        guard APISettings.storedEnabled else {
+            connectionRequestPending = true
+            return true
         }
+        switch status {
+        case .running, .starting: break
+        case .stopped, .failed: applyStoredSettings()
+        }
+        return false
+    }
+
+    /// ユーザーが明示的に API をオンにした（「API をオンにする」「API を開始」ボタン）
+    func enableAndStart() {
+        connectionRequestPending = false
+        UserDefaults.standard.set(true, forKey: APISettings.enabledKey)   // @AppStorage にも反映される
         switch status {
         case .running, .starting: return
         case .stopped, .failed: applyStoredSettings()

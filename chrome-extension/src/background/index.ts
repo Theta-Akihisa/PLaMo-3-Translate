@@ -19,6 +19,7 @@ import {
 import {
   APP_LAUNCH_URL,
   checkHealth,
+  classifyError,
   listAppModels,
   modelLabelOf,
   selectAppModel,
@@ -79,9 +80,9 @@ async function pump(): Promise<void> {
             first = false;
             job.send({ op: 'phase', id: job.id, phase: 'generating' });
           }
-          job.send({ op: 'chunk', id: job.id, text: cleanOutput(acc) });
+          job.send({ op: 'chunk', id: job.id, text: cleanOutput(acc, true) });
         };
-        const raw =
+        const r =
           s.backend === 'app' || s.backend === 'server'
             ? await serverComplete({
                 kind: s.backend,
@@ -91,8 +92,14 @@ async function pump(): Promise<void> {
                 signal: job.ctl.signal,
                 onText,
               })
-            : await wasmComplete(s, prompt, job.ctl.signal, onText);
-        job.send({ op: 'done', id: job.id, text: cleanOutput(raw), ms: Date.now() - t0 });
+            : { text: await wasmComplete(s, prompt, job.ctl.signal, onText), truncated: false };
+        job.send({
+          op: 'done',
+          id: job.id,
+          text: cleanOutput(r.text),
+          ms: Date.now() - t0,
+          ...(r.truncated ? { truncated: true } : {}),
+        });
       } catch (e) {
         const err = e as Error;
         const cancelled = job.ctl.signal.aborted || err?.name === 'AbortError';
@@ -100,6 +107,7 @@ async function pump(): Promise<void> {
           op: 'error',
           id: job.id,
           cancelled,
+          ...(cancelled ? {} : { kind: classifyError(e) }),
           message: cancelled
             ? 'キャンセルしました'
             : err instanceof Pfml3Error

@@ -142,16 +142,33 @@ enum APIRouter {
         return obj
     }
 
-    private static func intValue(_ v: Any?) -> Int? {
-        if let i = v as? Int { return i }
-        if let d = v as? Double { return Int(d) }
-        return nil
+    /// これより大きい（または小さい）数値は整数として扱わない（`Int(Double)` のトラップ防止）
+    static let intMagnitudeLimit: Double = 1e15
+
+    /// JSON の数値を Int にする。数値でない・真偽値・非有限（NaN / ±∞）・範囲外なら nil。
+    /// 小数は 0 方向に切り捨てる。
+    static func intValue(_ v: Any?) -> Int? {
+        guard let n = v as? NSNumber else { return nil }
+        // true / false も NSNumber として届くので除外する
+        if CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
+        let d = n.doubleValue
+        guard d.isFinite, abs(d) < intMagnitudeLimit else { return nil }
+        return Int(d.rounded(.towardZero))
     }
 
-    private static func maxTokens(_ obj: [String: Any]) -> Int {
-        let raw = intValue(obj["max_tokens"]) ?? intValue(obj["n_predict"]) ?? intValue(obj["max_completion_tokens"])
-        guard let n = raw, n > 0 else { return defaultMaxTokens }   // -1 などは既定値
-        return min(n, maxAllowedTokens)
+    /// `max_tokens`（別名 `n_predict` / `max_completion_tokens`）。
+    /// 省略・null・0 以下（llama-server の -1 など）は既定値、上限 `maxAllowedTokens` に丸める。
+    /// 数値として解釈できない値は 400 invalid_request。
+    static func maxTokens(_ obj: [String: Any]) -> Result<Int, APIError> {
+        for key in ["max_tokens", "n_predict", "max_completion_tokens"] {
+            guard let raw = obj[key], !(raw is NSNull) else { continue }
+            guard let n = intValue(raw) else {
+                return .failure(.invalidRequest("'\(key)' は整数で指定してください。"))
+            }
+            guard n > 0 else { return .success(defaultMaxTokens) }
+            return .success(min(n, maxAllowedTokens))
+        }
+        return .success(defaultMaxTokens)
     }
 
     private static func stopList(_ obj: [String: Any]) -> [String] {
@@ -190,12 +207,17 @@ enum APIRouter {
         guard let prompt, !prompt.isEmpty else {
             return fail(.invalidRequest("'prompt' を指定してください。"))
         }
+        let tokens: Int
+        switch maxTokens(obj) {
+        case .failure(let e): return fail(e)
+        case .success(let n): tokens = n
+        }
         let choice: ModelChoice
         switch resolveModel(obj["model"] as? String, state: state) {
         case .failure(let e): return fail(e)
         case .success(let c): choice = c
         }
-        return .generate(GenerationCall(kind: .completion, prompt: prompt, maxTokens: maxTokens(obj),
+        return .generate(GenerationCall(kind: .completion, prompt: prompt, maxTokens: tokens,
                                         stop: stopList(obj), stream: (obj["stream"] as? Bool) ?? false,
                                         model: choice.id, switchTo: choice.needsSwitch ? choice.id : nil,
                                         cors: cors))
@@ -270,12 +292,17 @@ enum APIRouter {
         } catch {
             return fail(.invalidRequest("プロンプトを組み立てられません: \(error)"))
         }
+        let tokens: Int
+        switch maxTokens(obj) {
+        case .failure(let e): return fail(e)
+        case .success(let n): tokens = n
+        }
         let choice: ModelChoice
         switch resolveModel(obj["model"] as? String, state: state) {
         case .failure(let e): return fail(e)
         case .success(let c): choice = c
         }
-        return .generate(GenerationCall(kind: .chat, prompt: prompt, maxTokens: maxTokens(obj),
+        return .generate(GenerationCall(kind: .chat, prompt: prompt, maxTokens: tokens,
                                         stop: stopList(obj), stream: (obj["stream"] as? Bool) ?? false,
                                         model: choice.id, switchTo: choice.needsSwitch ? choice.id : nil,
                                         cors: cors))
@@ -382,8 +409,8 @@ enum APIResponses {
         (call.kind == .chat ? "chatcmpl-" : "cmpl-") + UUID().uuidString.prefix(12).lowercased()
     }
 
-    /// 非ストリーミングの完全なレスポンス
-    static func completion(call: GenerationCall, id: String, text: String, finish: String = "stop") -> HTTPResponse {
+    /// 非ストリーミングの完全なレスポンス（`finish`: "stop" | "length"）
+    static func completion(call: GenerationCall, id: String, text: String, finish: String = APIFinishReason.stop.rawValue) -> HTTPResponse {
         switch call.kind {
         case .completion:
             return json(["id": id, "object": "text_completion", "created": call.created, "model": call.model,

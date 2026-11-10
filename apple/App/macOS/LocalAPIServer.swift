@@ -223,16 +223,16 @@ final class APIConnection {
     private func generate(_ call: GenerationCall) async {
         let id = APIResponses.newID(call)
         var headSent = false
-        // finish_reason: LlamaEngine.complete は停止理由（停止文字列/EOG/max_tokens）を返さないため常に "stop"
-        let finish = "stop"
+        // 終了理由はストリーム最後の .finished で届く（届かずに終わった場合は "stop"）
+        var finish = APIFinishReason.stop
         do {
             let stream = try await backend.apiStream(prompt: call.prompt, maxTokens: call.maxTokens,
                                                      stop: call.stop, switchTo: call.switchTo)
             if isClosed || Task.isCancelled { return }
             var it = stream.makeAsyncIterator()
             if call.stream {
-                // 最初の差分（または終了）を待ってからヘッダを送る。
-                // プロンプト長超過などの早期エラーを通常の HTTP エラーとして返せる。
+                // 最初のイベント（差分または終了）を待ってからヘッダを送る。
+                // プロンプト長超過（400）などの早期エラーを通常の HTTP エラーとして返せる。
                 let first = try await it.next()
                 if isClosed || Task.isCancelled { return }
                 send(HTTPResponse.streamingHead(headers: APIResponses.sseHeaders(cors: call.cors)), close: false)
@@ -241,24 +241,33 @@ final class APIConnection {
                     send(APIResponses.sseChunk(call: call, id: id, text: nil, finish: nil, role: true), close: false)
                 }
                 var next = first
-                while let delta = next {
-                    if !delta.isEmpty {
-                        send(APIResponses.sseChunk(call: call, id: id, text: delta, finish: nil), close: false)
+                while let event = next {
+                    switch event {
+                    case .text(let delta):
+                        if !delta.isEmpty {
+                            send(APIResponses.sseChunk(call: call, id: id, text: delta, finish: nil), close: false)
+                        }
+                    case .finished(let reason):
+                        finish = reason
                     }
                     next = try await it.next()
                     if isClosed || Task.isCancelled { return }
                 }
-                var tail = APIResponses.sseChunk(call: call, id: id, text: call.kind == .chat ? nil : "", finish: finish)
+                var tail = APIResponses.sseChunk(call: call, id: id, text: call.kind == .chat ? nil : "",
+                                                 finish: finish.rawValue)
                 tail.append(APIResponses.sseDone)
                 send(tail, close: true)
             } else {
                 var text = ""
-                while let delta = try await it.next() {
+                while let event = try await it.next() {
                     if isClosed || Task.isCancelled { return }
-                    text += delta
+                    switch event {
+                    case .text(let delta): text += delta
+                    case .finished(let reason): finish = reason
+                    }
                 }
                 if isClosed || Task.isCancelled { return }
-                send(APIResponses.completion(call: call, id: id, text: text, finish: finish), cors: call.cors)
+                send(APIResponses.completion(call: call, id: id, text: text, finish: finish.rawValue), cors: call.cors)
             }
         } catch {
             if isClosed || Task.isCancelled { return }
