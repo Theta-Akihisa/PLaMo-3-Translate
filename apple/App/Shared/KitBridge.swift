@@ -352,6 +352,7 @@ final class AppModel: ObservableObject {
     private func startLoad(spec: ModelSpec, quant: String, contextLength: Int, key: String) -> Task<Void, Error> {
         loadGeneration += 1
         let generation = loadGeneration
+        let previousKey = loadedKey
         loadedKey = nil   // Translator.load は前のエンジンを解放する
         let task = Task { [weak self] in
             guard let self else { throw CancellationError() }
@@ -365,6 +366,10 @@ final class AppModel: ObservableObject {
                 if self.loadGeneration == generation {
                     self.loadTask = nil
                     self.loadTaskKey = nil
+                    // モデルファイルが無いとき Translator.load は前のエンジンを残したまま投げる（状態も変えない）
+                    if let e = error as? TranslatorError, case .modelNotInstalled = e, self.translator.engine != nil {
+                        self.loadedKey = previousKey
+                    }
                 }
                 throw error
             }
@@ -867,7 +872,12 @@ extension AppModel: APIBackend {
                    switchTo: String?) async throws -> AsyncThrowingStream<APIStreamEvent, Error> {
         if let id = switchTo, id != settings.modelID { try apiSelectModel(id: id) }
         guard isCurrentModelInstalled else { throw APIError.modelNotInstalled(currentSpec.label) }
-        try await ensureLoaded()
+        do {
+            try await ensureLoaded()
+        } catch TranslatorError.modelNotInstalled, AppError.modelNotInstalled {
+            // 読み込みの直前に削除された → 409 model_not_installed
+            throw APIError.modelNotInstalled(currentSpec.label)
+        }
         guard let engine = translator.engine else { throw AppError.engineUnavailable }
         return AppModel.apiEvents(engine.completeEvents(prompt: prompt, maxTokens: maxTokens, stop: stop))
     }
@@ -900,6 +910,10 @@ extension AppModel: APIBackend {
     private nonisolated static func apiError(for error: Error) -> Error {
         if let e = error as? LlamaEngineError, case .promptTooLong = e {
             return APIError.invalidRequest(e.localizedDescription)
+        }
+        // モデルの切り替え・解放で生成が止められた（クライアントが切断した場合はサーバ側で送信しない）
+        if error is CancellationError {
+            return APIError.unavailable("モデルの切り替えまたは解放のため生成を中断しました。もう一度お試しください。")
         }
         return error
     }

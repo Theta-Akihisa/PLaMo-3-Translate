@@ -51,6 +51,8 @@ enum APIError: Error, Equatable {
     /// モデルの表示名（例: "2B"）
     case modelNotInstalled(String)
     case methodNotAllowed(String)
+    /// モデルの切り替え・解放で生成が中断された（再試行すればよい）
+    case unavailable(String)
     case server(String)
 
     var status: Int {
@@ -60,6 +62,7 @@ enum APIError: Error, Equatable {
         case .notFound, .unknownModel: return 404
         case .modelNotInstalled: return 409
         case .methodNotAllowed: return 405
+        case .unavailable: return 503
         case .server: return 500
         }
     }
@@ -71,6 +74,7 @@ enum APIError: Error, Equatable {
         case .invalidRequest, .methodNotAllowed: return "invalid_request"
         case .notFound, .unknownModel: return "not_found"
         case .modelNotInstalled: return "model_not_installed"
+        case .unavailable: return "unavailable"
         case .server: return "server_error"
         }
     }
@@ -87,6 +91,7 @@ enum APIError: Error, Equatable {
         case .modelNotInstalled(let label):
             return "モデル \(label) がダウンロードされていません。PLaMo Translate アプリの「モデル」画面でダウンロードしてください。"
         case .methodNotAllowed(let allowed): return "このメソッドは使用できません（使用可能: \(allowed)）。"
+        case .unavailable(let m): return m
         case .server(let m): return m
         }
     }

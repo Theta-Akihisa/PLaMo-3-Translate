@@ -35,7 +35,15 @@ struct TranslateTextIntent: AppIntent {
         guard !input.isEmpty else {
             throw IntentError.message("翻訳するテキストが空です。")
         }
-        let result = try await model.performTranslation(text: input, targetLang: targetLanguage.rawValue)
+        var partial = ""
+        let result: TranslationOutput
+        do {
+            result = try await model.performTranslation(text: input, targetLang: targetLanguage.rawValue) { partial = $0 }
+        } catch is CancellationError {
+            // モデルの切り替え・解放などで中断された: エラーにせず、途中までの訳文を返す
+            let text = partial.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .result(value: text, dialog: IntentDialog(stringLiteral: text.isEmpty ? "翻訳が中断されました。" : text))
+        }
         // 長さの上限で途中で切れた場合も、途中までの訳文を返し、ダイアログで知らせる
         let dialog = result.warning.map { "\($0)\n\n\(result.text)" } ?? result.text
         return .result(value: result.text, dialog: IntentDialog(stringLiteral: dialog))

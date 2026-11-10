@@ -368,6 +368,12 @@ final class APIRouterTests: XCTestCase {
         let stop = String(decoding: APIResponses.sseChunk(call: tc, id: "c", text: "", finish: APIFinishReason.stop.rawValue), as: UTF8.self)
         XCTAssertTrue(stop.contains("\"finish_reason\":\"stop\""))
 
+        // モデルの切り替え・解放による中断 → 503 unavailable（SSE 途中ならエラーイベント）
+        let busy = APIResponses.error(for: APIError.unavailable("x"))
+        XCTAssertEqual(busy.status, 503)
+        XCTAssertEqual(errorType(busy), "unavailable")
+        XCTAssertTrue(String(decoding: APIResponses.sseError(APIError.unavailable("x")), as: UTF8.self).contains("\"code\":503"))
+
         // プロンプト長超過はバックエンドが invalid_request に変換して投げる → 400
         let tooLong = APIResponses.error(for: APIError.invalidRequest("入力が長すぎます"))
         XCTAssertEqual(tooLong.status, 400)

@@ -154,7 +154,7 @@ curl http://127.0.0.1:18080/v1/chat/completions -H 'Content-Type: application/js
 curl -i http://127.0.0.1:18080/health -H 'Origin: https://example.com'
 ```
 
-- エラーは OpenAI 互換の `{"error":{"message":"…","type":"model_not_installed","code":409}}`（`type`: `forbidden_host` / `forbidden_origin` / `model_not_installed` / `invalid_request` / `not_found` / `server_error`）
+- エラーは OpenAI 互換の `{"error":{"message":"…","type":"model_not_installed","code":409}}`（`type`: `forbidden_host` / `forbidden_origin` / `model_not_installed` / `invalid_request` / `not_found` / `unavailable`（503: モデルの切り替え・解放で生成を中断。再試行可） / `server_error`）
 - `/v1/completions` の `model` に別のダウンロード済みモデル ID を指定すると、`/v1/models/select` と同様に切り替えてから実行します
 - 停止文字列は `<|plamo:tag|>` / `<|plamo:bos|>` が常に追加されます。温度は常に greedy（`temperature` は無視）
 - `finish_reason` は生成が `max_tokens`（またはコンテキストの残り）に達して打ち切られたら `"length"`、EOG・停止文字列で終わったら `"stop"`（非ストリーム・SSE とも）
