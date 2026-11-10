@@ -27,6 +27,8 @@ enum MacSection: String, CaseIterable, Identifiable {
 
 struct MacRootView: View {
     @EnvironmentObject var model: AppModel
+    @ObservedObject private var api = LocalAPIController.shared
+    @AppStorage(APISettings.portKey) private var apiPort = APISettings.defaultPort
     @State private var selection: MacSection? = .translate
 
     var body: some View {
@@ -48,6 +50,13 @@ struct MacRootView: View {
         .onboardingSheet()
         // ⌘O（ファイルを開く）は翻訳画面で受ける
         .onChange(of: model.showFileImporter) { _, open in if open { selection = .translate } }
+        // plamotranslate://open を受けたが API がオフ: 設定は勝手に変えず、ここで確認する
+        .alert("Chrome 拡張機能が接続を求めています", isPresented: $api.connectionRequestPending) {
+            Button("API をオンにする") { api.enableAndStart() }
+            Button("オフのままにする", role: .cancel) {}
+        } message: {
+            Text("Chrome 拡張機能「PLaMo Translate」がこのアプリへの接続を要求しました。ローカル API サーバは設定でオフになっています。オンにすると、拡張機能から http://127.0.0.1:\(String(apiPort)) 経由で翻訳できます（設定 > Chrome 拡張機能 でいつでもオフにできます）。")
+        }
     }
 }
 

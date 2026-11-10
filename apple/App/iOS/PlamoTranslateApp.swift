@@ -53,7 +53,7 @@ struct RootTabView: View {
             tab = 0
             if let t = value("target"), model.targetLanguages.contains(where: { $0.code == t }) { model.settings.targetLang = t }
             if let s = value("source"), model.sourceLanguages.contains(where: { $0.code == s }) { model.settings.sourceLang = s }
-            if let text = value("text"), !text.isEmpty { model.translate(externalText: text) }
+            if let text = value("text"), !text.isEmpty { model.translate(externalText: text, from: "URL スキーム") }
         }
         .onChange(of: scenePhase) { _, phase in
             // バックグラウンドでは Metal の実行が許可されないため、生成を止める

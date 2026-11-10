@@ -28,9 +28,11 @@ struct PlamoTranslateMacApp: App {
             TextSizeCommands()
         }
 
-        MenuBarExtra("PLaMo 翻訳", systemImage: "character.bubble") {
+        MenuBarExtra {
             QuickTranslateView()
                 .environmentObject(model)
+        } label: {
+            MenuBarLabel()
         }
         .menuBarExtraStyle(.window)
 
@@ -38,6 +40,49 @@ struct PlamoTranslateMacApp: App {
             MacSettingsView()
                 .environmentObject(model)
         }
+    }
+}
+
+extension Notification.Name {
+    /// メインウィンドウを開く依頼（`MenuBarLabel` が `openWindow` で受ける）
+    static let openMainWindowRequest = Notification.Name("PlamoTranslate.openMainWindowRequest")
+}
+
+/// メインウィンドウ（WindowGroup "main"）を前面に出す。閉じられていれば SwiftUI の openWindow で開き直す。
+@MainActor
+enum MainWindow {
+    /// 表示中（または最小化中）のメインウィンドウ。パネル・設定・メニューバーのポップアップは除く
+    static var existing: NSWindow? {
+        NSApp.windows.first { w in
+            !(w is NSPanel) && w.canBecomeMain && w.styleMask.contains(.titled)
+                && (w.isVisible || w.isMiniaturized)
+                && !(w.identifier?.rawValue.contains("Settings") ?? false)
+        }
+    }
+
+    static func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = existing {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            // URL スキーム経由で開くと onOpenURL が再び呼ばれる（API の設定に触れる）ので使わない
+            NotificationCenter.default.post(name: .openMainWindowRequest, object: nil)
+        }
+    }
+}
+
+/// メニューバーのアイコン。常に存在する SwiftUI ビューなので、ここでメインウィンドウを開く依頼を受ける
+struct MenuBarLabel: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(systemName: "character.bubble")
+            .accessibilityLabel("PLaMo 翻訳")
+            .onReceive(NotificationCenter.default.publisher(for: .openMainWindowRequest)) { _ in
+                openWindow(id: "main")
+                NSApp.activate(ignoringOtherApps: true)
+            }
     }
 }
 
@@ -55,14 +100,19 @@ enum MacURLHandler {
         NSApp.activate(ignoringOtherApps: true)
         switch url.host?.lowercased() {
         case "translate":
+            // 原文を置き換えるので、必ずウィンドウを前面に出して見えるようにする（元に戻す案内も出る）
+            MainWindow.show()
             guard let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return }
             func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
             if let t = value("target"), model.targetLanguages.contains(where: { $0.code == t }) { model.settings.targetLang = t }
             if let s = value("source"), model.sourceLanguages.contains(where: { $0.code == s }) { model.settings.sourceLang = s }
-            if let text = value("text"), !text.isEmpty { model.translate(externalText: text) }
+            if let text = value("text"), !text.isEmpty { model.translate(externalText: text, from: "URL スキーム") }
         default:
-            // "open" など: アプリを前面に出し、拡張機能が接続できるよう API サーバを待ち受け状態にする
-            LocalAPIController.shared.ensureRunning()
+            // "open" など: アプリを前面に出す。API がオンなら待ち受けを確実にし、
+            // オフなら設定は変えずに、メインウィンドウで「API をオンにする」か確認する
+            if LocalAPIController.shared.handleOpenRequest() {
+                MainWindow.show()
+            }
         }
     }
 }
@@ -118,5 +168,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         AppModel.shared.stopTranslation()
+        AppModel.shared.flushHistory()
     }
 }

@@ -34,6 +34,7 @@ macOS アプリが `127.0.0.1` 上に llama-server 互換のサブセット API 
 | `model_not_installed` | 409 | 指定（または選択中）のモデルが未ダウンロード。アプリの「モデル」画面でダウンロードが必要 |
 | `invalid_request` | 400 | JSON 不正・必須項目なし・PFML3 検証エラーなど |
 | `not_found` | 404 | 未知のパス／未知のモデル ID |
+| `unavailable` | 503 | モデルの切り替え・解放のため生成を中断した（再試行してよい）。SSE 開始後はエラーイベントとして届く |
 | `server_error` | 500 | 推論エラーなど |
 
 ## エンドポイント
@@ -90,8 +91,13 @@ macOS アプリが `127.0.0.1` 上に llama-server 互換のサブセット API 
 - `prompt` は PFML3 文字列（BOS は含めない。アプリがトークナイズ時に付加）。
 - `model` は省略可。`plamo-3-translate` または選択中モデルの ID なら選択中モデルで実行。
   別のダウンロード済みモデル ID が指定された場合は `/v1/models/select` と同様に切り替えてから実行。
+- `max_tokens`（別名 `n_predict` / `max_completion_tokens`）: 省略・`null`・0 以下（`-1` など）は既定 2048、上限 8192 に丸める。
+  数値でない値・有限でない値・極端に大きい値（`1e30` など）は `400 invalid_request`。
 - 非ストリーム: `{"id","object":"text_completion","created","model","choices":[{"index":0,"text":"…","finish_reason":"stop"|"length"}]}`
 - `stream: true`: SSE で `data: {"choices":[{"index":0,"text":"差分","finish_reason":null}]}` を送り、最後に `finish_reason` 付きチャンクと `data: [DONE]`。
+- `finish_reason`: `max_tokens`（またはコンテキストの残り）に達して打ち切られたら `"length"`、EOG・停止文字列で終わったら `"stop"`。
+  `"length"` のときは訳文が途中で切れている可能性がある。
+- プロンプトがモデルのコンテキスト長に収まらない場合は `400 invalid_request`（SSE でもヘッダ送信前に通常の HTTP エラーとして返す）。
 - クライアントが接続を閉じたら生成を中断する。リクエストはアプリ内で直列化される（UI の翻訳と同じエンジン）。
 
 ### `POST /v1/chat/completions`（便利 API）
@@ -103,5 +109,6 @@ macOS アプリが `127.0.0.1` 上に llama-server 互換のサブセット API 
 
 - 既定バックエンド: **macOS アプリ**（`http://127.0.0.1:18080`）。上級者向けに「llama-server」（既定 `http://127.0.0.1:8080`）、実験的に「ブラウザ内 WASM」。
 - 起動していない（接続拒否）→「macOS アプリが起動していません」と表示し、「アプリを起動」ボタンで `plamotranslate://open` を開いてから `/health` をポーリング。
+  アプリは `open` で API のオン/オフ設定を変えない。オフに設定されている場合はアプリ側に「API をオンにする」確認を表示し、ユーザーがオンにするまで接続できない（拡張機能はポーリングがタイムアウトしたら「アプリの設定で API をオンにしてください」と案内する）。
 - `no_model` →「アプリでモデルをダウンロードしてください」。
 - モデルサイズ選択（0.8B / 2B / 8B）は `/v1/models` の `installed` を反映し、変更時に `/v1/models/select` を呼ぶ。未ダウンロードのサイズは選択不可（「アプリでダウンロード」と表示）。
