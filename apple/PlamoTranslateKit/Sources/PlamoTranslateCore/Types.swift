@@ -113,14 +113,18 @@ public struct DocumentProgress: Sendable, Equatable {
     public var text: String
     /// 翻訳対象の段落数
     public var totalParagraphs: Int
-    /// 翻訳が完了した段落数
+    /// 翻訳が完了した段落数（打ち切られた段落も含む）
     public var completedParagraphs: Int
     public var isFinished: Bool
-    public init(text: String, totalParagraphs: Int, completedParagraphs: Int, isFinished: Bool) {
+    /// 出力がトークン上限に達して途中で打ち切られた段落の数（その段落の途中までの訳は `text` に含まれる）
+    public var truncatedParagraphs: Int
+    public init(text: String, totalParagraphs: Int, completedParagraphs: Int, isFinished: Bool,
+                truncatedParagraphs: Int = 0) {
         self.text = text
         self.totalParagraphs = totalParagraphs
         self.completedParagraphs = completedParagraphs
         self.isFinished = isFinished
+        self.truncatedParagraphs = truncatedParagraphs
     }
     public var fraction: Double {
         totalParagraphs == 0 ? 1 : Double(completedParagraphs) / Double(totalParagraphs)
