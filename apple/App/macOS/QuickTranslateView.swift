@@ -4,7 +4,6 @@ import AppKit
 /// メニューバーのクイック翻訳（貼り付けて翻訳）
 struct QuickTranslateView: View {
     @EnvironmentObject var model: AppModel
-    @Environment(\.openWindow) private var openWindow
     @ObservedObject private var api = LocalAPIController.shared
     @State private var input = ""
     @State private var output = ""
@@ -57,10 +56,7 @@ struct QuickTranslateView: View {
             HStack {
                 Button("コピー") { Clipboard.copy(output) }.disabled(output.isEmpty)
                 Spacer()
-                Button("ウィンドウを開く") {
-                    openWindow(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
-                }
+                Button("ウィンドウを開く") { MainWindow.show() }
                 Button("終了") { NSApplication.shared.terminate(nil) }
             }
             Divider()
@@ -75,7 +71,7 @@ struct QuickTranslateView: View {
                     .help(api.statusText)
                 Spacer()
                 if !api.isRunning {
-                    Button("API を開始") { api.ensureRunning() }
+                    Button("API を開始") { api.enableAndStart() }
                         .controlSize(.small)
                 }
                 SettingsLink { Text("設定…") }

@@ -52,16 +52,10 @@ final class ResultPanelController {
         panel = nil
     }
 
-    /// パネルを閉じてメインウィンドウを前面に出す。ウィンドウが閉じられていれば開き直す
+    /// パネルを閉じてメインウィンドウを前面に出す。ウィンドウが閉じられていれば SwiftUI の openWindow で開き直す
     func openMainWindow() {
         close()
-        NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: { !($0 is NSPanel) && $0.canBecomeMain }) {
-            window.makeKeyAndOrderFront(nil)
-        } else if let url = URL(string: "plamotranslate://open") {
-            // メインウィンドウが無い場合は URL スキーム経由で WindowGroup に新しいウィンドウを作らせる
-            NSWorkspace.shared.open(url)
-        }
+        MainWindow.show()
     }
 
     /// ユーザーがパネルの大きさを手で変えたら、以降は自動で広げない
