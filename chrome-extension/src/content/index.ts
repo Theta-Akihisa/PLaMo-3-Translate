@@ -2,7 +2,7 @@ import { translateStream, type TranslateHandle, TranslateCancelled } from '../co
 import { loadSettings, onSettingsChanged } from '../core/settings';
 import { TARGET_LANGUAGES } from '../core/catalog';
 import { detectLanguage, smartTarget } from '../core/detect';
-import type { RuntimeMessage } from '../core/protocol';
+import { TRUNCATED_WARNING, type RuntimeMessage } from '../core/protocol';
 import { Panel, SelectionIcon, isOwnNode } from './ui';
 import { PageTranslator } from './page-translate';
 
@@ -45,29 +45,47 @@ function currentSelectionText(): string {
   return '';
 }
 
-type Replacer = (text: string) => void;
+/** 置き換える。置き換えられなかったときは理由を返す */
+type Replacer = (text: string) => string | null;
+
+const CHANGED_SINCE_TRANSLATE =
+  '翻訳を始めた後で入力欄の内容が変わったため、置き換えませんでした。もう一度選択して翻訳してください';
+const FIELD_GONE = '入力欄が見つからないため、置き換えませんでした';
 
 function makeReplacer(): Replacer | undefined {
   const a = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
   if (a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT') && typeof a.selectionStart === 'number' && a.selectionStart !== a.selectionEnd && !a.readOnly && !a.disabled) {
     const start = a.selectionStart;
     const end = a.selectionEnd as number;
+    const orig = a.value;
     return (text) => {
+      if (!a.isConnected || a.readOnly || a.disabled) return FIELD_GONE;
+      // 翻訳中にユーザー (やページ) が内容を変えていたら、古い位置に書き込まない
+      if (a.value !== orig) return CHANGED_SINCE_TRANSLATE;
       a.focus();
       a.setRangeText(text, start, end, 'select');
       a.dispatchEvent(new Event('input', { bubbles: true }));
+      return null;
     };
   }
   const sel = window.getSelection();
   if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
     const node = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode?.parentElement;
     if (node && (node as HTMLElement).isContentEditable) {
+      // 編集ホスト (contenteditable の一番外側) の内容が変わっていないことを確認してから置き換える
+      let host = node as HTMLElement;
+      while (host.parentElement?.isContentEditable) host = host.parentElement;
+      const origHost = host.textContent;
       const range = sel.getRangeAt(0).cloneRange();
+      const origSel = range.toString();
       return (text) => {
+        if (!host.isConnected || !host.isContentEditable) return FIELD_GONE;
+        if (host.textContent !== origHost || range.toString() !== origSel) return CHANGED_SINCE_TRANSLATE;
         const s2 = window.getSelection();
         s2?.removeAllRanges();
         s2?.addRange(range);
         document.execCommand('insertText', false, text);
+        return null;
       };
     }
   }
@@ -93,6 +111,7 @@ async function translateSelection(textArg?: string): Promise<void> {
     const my = ++seq;
     current?.cancel();
     p.setBusy(true);
+    p.setWarning('');
     p.setPlaceholder('言語を検出中…');
     let source = s.sourceLang;
     let tgt = target;
@@ -131,7 +150,9 @@ async function translateSelection(textArg?: string): Promise<void> {
       latest = r.text;
       p.setText(r.text || '(翻訳結果が空でした)');
       p.setStatus(`完了 (${(r.ms / 1000).toFixed(1)} 秒)`);
-      p.setBusy(false);
+      // 最大トークン数で途中で切れた訳文は表示だけして警告し、置き換えには使わない
+      if (r.truncated) p.setWarning(TRUNCATED_WARNING);
+      p.setBusy(r.truncated || !r.text);
     } catch (e) {
       if (e instanceof TranslateCancelled || my !== seq) return;
       p.setError((e as Error).message);
@@ -164,7 +185,7 @@ async function translateSelection(textArg?: string): Promise<void> {
           return ok;
         }
       },
-      onReplace: replacer ? () => latest && replacer(latest) : undefined,
+      onReplace: replacer ? () => (latest ? replacer(latest) : '訳文がありません') : undefined,
       onChange: (t, f) => {
         userPickedTarget = true;
         target = t;

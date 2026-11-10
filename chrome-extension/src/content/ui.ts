@@ -25,6 +25,8 @@ select { font: inherit; font-size: 12px; border:1px solid #cbd1d9; border-radius
 .body { padding: 10px 12px; overflow:auto; white-space: pre-wrap; word-break: break-word; min-height: 2.4em; }
 .body.err { color:#b3261e; }
 .body.dim { color:#6b7280; }
+.warn { margin: 0 12px 8px; padding: 6px 8px; border-radius: 7px; font-size: 12px; line-height: 1.5; color:#7a4b00; background:#fff4dc; }
+.warn[hidden] { display: none; }
 .foot { display:flex; align-items:center; gap:8px; padding: 6px 10px 8px; border-top: 1px solid #eceff3; font-size:12px; color:#6b7280; }
 .foot .sp { flex:1; }
 button { font: inherit; font-size: 12px; cursor:pointer; border:1px solid #cbd1d9; background:#f6f7f9; color:#1d1d1f; border-radius:7px; padding: 3px 10px; }
@@ -35,7 +37,12 @@ button.x { border:none; background:transparent; font-size:16px; line-height:1; p
   box-shadow: 0 4px 16px rgba(0,0,0,.3); }
 .bar button { background:#3a3a3d; color:#fff; border-color:#55555a; }
 .bar button:hover { background:#4a4a4f; }
-.bar .prog { min-width: 5em; font-variant-numeric: tabular-nums; }
+.bar { max-width: min(560px, calc(100vw - 32px)); }
+.bar .prog { min-width: 5em; font-variant-numeric: tabular-nums; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.bar .brand { font-weight: 700; flex: none; }
+.bar button { flex: none; }
+.bar button.x { background: transparent; border: none; color: inherit; font-size: 16px; padding: 2px 6px; }
+.bar.error { border-radius: 14px; background: #7f1d1d; }
 @media (prefers-color-scheme: dark) {
   .sel-icon { background:#2b2e33; border-color:#454950; color:#8fb0ff; } .sel-icon:hover { background:#363a40; }
   select { background:#2b2e33; border-color:#454950; }
@@ -44,7 +51,9 @@ button.x { border:none; background:transparent; font-size:16px; line-height:1; p
   .foot { border-color:#32353a; color:#9aa3b0; }
   button { background:#2b2e33; color:#ececf0; border-color:#454950; } button:hover { background:#363a40; }
   .body.dim { color:#9aa3b0; } .body.err { color:#ff8a80; }
+  .warn { color:#ffd38a; background:#3a2e17; }
   .bar { background:#f1f1f4; color:#1d1d1f; } .bar button { background:#e0e0e6; color:#1d1d1f; border-color:#c6c6cf; }
+  .bar.error { background:#fde2e1; color:#7f1d1d; } .bar button.x { background: transparent; color: inherit; }
 }
 `;
 
@@ -83,13 +92,15 @@ function el<K extends keyof HTMLElementTagNameMap>(
 export interface PanelHandlers {
   onClose: () => void;
   onCopy: () => Promise<boolean> | boolean;
-  onReplace?: () => void;
+  /** 置き換える。置き換えられなかったときは理由 (メッセージ) を返す */
+  onReplace?: () => string | null;
   onChange: (target: string, form: string) => void;
 }
 
 export class Panel {
   private box = el('div', 'panel');
   private body = el('div', 'body dim', '準備中…');
+  private warn = el('div', 'warn');
   private foot = el('span', '', '');
   private copyBtn = el('button', '', 'コピー');
   private replaceBtn = el('button', 'primary', '置き換え');
@@ -130,13 +141,16 @@ export class Panel {
     foot.append(this.foot, el('span', 'sp'));
     if (this.h.onReplace) {
       this.replaceBtn.addEventListener('click', () => {
-        this.h.onReplace?.();
-        this.close();
+        const err = this.h.onReplace?.();
+        if (err) this.setWarning(err);
+        else this.close();
       });
       foot.append(this.replaceBtn);
     }
     foot.append(this.copyBtn);
-    this.box.append(head, this.body, foot);
+    this.warn.setAttribute('role', 'alert');
+    this.warn.hidden = true;
+    this.box.append(head, this.body, this.warn, foot);
     getRoot().appendChild(this.box);
     this.place(anchor);
     this.keyHandler = (e: KeyboardEvent) => {
@@ -168,6 +182,11 @@ export class Panel {
   /** 翻訳が完了するまで「置き換え」を無効にする (途中結果で置換しない) */
   setBusy(busy: boolean): void {
     this.replaceBtn.disabled = busy;
+  }
+  /** 本文の下に警告を出す (空文字で消す) */
+  setWarning(t: string): void {
+    this.warn.textContent = t;
+    this.warn.hidden = !t;
   }
   setText(t: string): void {
     this.body.className = 'body';
@@ -226,20 +245,44 @@ export class SelectionIcon {
   }
 }
 
+export interface BarView {
+  text: string;
+  /** ツールチップ (スキップ理由など) */
+  title?: string;
+  error?: boolean;
+  stop?: boolean;
+  restore?: boolean;
+  retry?: boolean;
+  close?: boolean;
+}
+
+/** ページ翻訳のツールバー (右下)。進捗・エラー・スキップ数を表示する */
 export class ProgressBar {
   private bar = el('div', 'bar');
   private prog = el('span', 'prog', '');
   private stop = el('button', '', '翻訳を停止');
   private restore = el('button', '', '原文に戻す');
-  constructor(handlers: { onStop: () => void; onRestore: () => void }) {
+  private retry = el('button', '', '再試行');
+  private close = el('button', 'x', '×');
+  constructor(handlers: { onStop: () => void; onRestore: () => void; onRetry: () => void; onClose: () => void }) {
     this.stop.addEventListener('click', handlers.onStop);
     this.restore.addEventListener('click', handlers.onRestore);
-    this.bar.append(el('span', '', 'PLaMo'), this.prog, this.stop, this.restore);
+    this.retry.addEventListener('click', handlers.onRetry);
+    this.close.addEventListener('click', handlers.onClose);
+    this.close.title = '閉じる';
+    this.close.setAttribute('aria-label', '閉じる');
+    this.bar.setAttribute('role', 'status');
+    this.bar.append(el('span', 'brand', 'PLaMo'), this.prog, this.stop, this.retry, this.restore, this.close);
     getRoot().appendChild(this.bar);
   }
-  update(mode: 'translating' | 'translated', done: number, total: number, note?: string): void {
-    this.prog.textContent = note ?? (mode === 'translating' ? `翻訳中 ${done}/${total}` : `翻訳済み ${done}/${total}`);
-    this.stop.style.display = mode === 'translating' ? '' : 'none';
+  render(v: BarView): void {
+    this.prog.textContent = v.text;
+    this.prog.title = v.title ?? '';
+    this.bar.classList.toggle('error', !!v.error);
+    this.stop.style.display = v.stop ? '' : 'none';
+    this.restore.style.display = v.restore ? '' : 'none';
+    this.retry.style.display = v.retry ? '' : 'none';
+    this.close.style.display = v.close ? '' : 'none';
   }
   remove(): void {
     this.bar.remove();
