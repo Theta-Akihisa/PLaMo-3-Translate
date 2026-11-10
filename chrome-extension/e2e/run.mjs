@@ -9,7 +9,9 @@ import { startMock } from './mock-server.mjs';
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
 const here = path.dirname(fileURLToPath(import.meta.url));
-const ext = path.resolve(here, '../dist');
+// E2E 用ビルド (node build.mjs --e2e): ページ内 UI の shadow root が open (本番の dist/ は closed)
+const ext = path.resolve(here, '../dist-e2e');
+const prodDist = path.resolve(here, '../dist');
 const vectors = JSON.parse(fs.readFileSync(path.resolve(here, '../../shared/pfml3-test-vectors.json'), 'utf8')).vectors;
 const prompt = (name) => vectors.find((v) => v.name === name).prompt;
 
@@ -378,8 +380,10 @@ await test('content: selection icon -> card (streamed), target select, replace i
   if (process.env.E2E_DEBUG) console.log('DUMP', await page.evaluate(() => document.querySelector('[data-plamo-translate]')?.shadowRoot.querySelector('.panel .body')?.textContent), JSON.stringify(await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings)), mock.requests.length);
   await page.waitForFunction(() => document.querySelector('[data-plamo-translate]').shadowRoot.querySelector('.panel .body')?.textContent.includes('会議は来週の月曜日に変更されました。'), null, { timeout: 15000 });
   await page.screenshot({ path: path.join(SHOTS, 'page-panel.png') });
-  // 翻訳先を変更 -> 再翻訳
-  await page.locator('[data-plamo-translate] .panel select').first().selectOption('en');
+  // 翻訳先を変更 -> 再翻訳 (UI は isTrusted のイベントにしか反応しないので、キーボードで選ぶ: ja の次が en)
+  await page.locator('[data-plamo-translate] .panel select').first().focus();
+  await page.keyboard.press('ArrowDown');
+  eq(await page.locator('[data-plamo-translate] .panel select').first().inputValue(), 'en', 'target select');
   await page.waitForFunction(() => document.querySelector('[data-plamo-translate]').shadowRoot.querySelector('.panel .body')?.textContent.includes('完了') || document.querySelector('[data-plamo-translate]').shadowRoot.querySelector('.panel .foot')?.textContent.includes('完了'), null, { timeout: 15000 });
   await sleep(500);
   assert(mock.requests.at(-1).prompt.includes('<|plamo:val|>en<|plamo:msg|>'), 'en target after change');

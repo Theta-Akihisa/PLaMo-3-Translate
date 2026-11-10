@@ -57,6 +57,19 @@ button.x { border:none; background:transparent; font-size:16px; line-height:1; p
 }
 `;
 
+/** esbuild の define で置き換わる。E2E テスト用ビルド (node build.mjs --e2e) のときだけ true */
+declare const __E2E__: boolean;
+
+/**
+ * ページのスクリプトが合成したイベント (isTrusted = false) では何もしない。
+ * ページが翻訳カードやツールバーを操作できないようにする。
+ */
+export function trusted<E extends Event>(fn: (e: E) => void): (e: E) => void {
+  return (e) => {
+    if (e.isTrusted) fn(e);
+  };
+}
+
 let root: ShadowRoot | null = null;
 
 export function getRoot(): ShadowRoot {
@@ -64,7 +77,9 @@ export function getRoot(): ShadowRoot {
   const host = document.createElement('div');
   host.setAttribute('data-plamo-translate', '');
   host.style.cssText = 'all: initial; position: static;';
-  root = host.attachShadow({ mode: 'open' });
+  // closed: ページのスクリプトから shadow 内の UI (訳文・ボタン) に触れないようにする。
+  // E2E テスト用ビルドだけは Playwright から中を調べられるよう open にする (本番ビルドには含まれない)
+  root = host.attachShadow({ mode: __E2E__ ? 'open' : 'closed' });
   const st = document.createElement('style');
   st.textContent = CSS;
   root.appendChild(st);
@@ -122,29 +137,38 @@ export class Panel {
     this.formSel.value = opts.form;
     this.formSel.setAttribute('aria-label', '文体');
     const fire = () => this.h.onChange(this.targetSel.value, this.formSel.value);
-    this.targetSel.addEventListener('change', () => {
-      this.formSel.style.display = this.targetSel.value === 'ja' ? '' : 'none';
-      fire();
-    });
-    this.formSel.addEventListener('change', fire);
+    this.targetSel.addEventListener(
+      'change',
+      trusted(() => {
+        this.formSel.style.display = this.targetSel.value === 'ja' ? '' : 'none';
+        fire();
+      }),
+    );
+    this.formSel.addEventListener('change', trusted(fire));
     this.formSel.style.display = opts.target === 'ja' ? '' : 'none';
     const x = el('button', 'x', '×');
     x.title = '閉じる (Esc)';
-    x.addEventListener('click', () => this.close());
+    x.addEventListener('click', trusted(() => this.close()));
     head.append(el('span', 'title', 'PLaMo'), this.targetSel, this.formSel, el('span', 'sp'), x);
     const foot = el('div', 'foot');
-    this.copyBtn.addEventListener('click', async () => {
-      const ok = await this.h.onCopy();
-      this.copyBtn.textContent = ok ? 'コピーしました' : 'コピー失敗';
-      setTimeout(() => (this.copyBtn.textContent = 'コピー'), 1500);
-    });
+    this.copyBtn.addEventListener(
+      'click',
+      trusted(async () => {
+        const ok = await this.h.onCopy();
+        this.copyBtn.textContent = ok ? 'コピーしました' : 'コピー失敗';
+        setTimeout(() => (this.copyBtn.textContent = 'コピー'), 1500);
+      }),
+    );
     foot.append(this.foot, el('span', 'sp'));
     if (this.h.onReplace) {
-      this.replaceBtn.addEventListener('click', () => {
-        const err = this.h.onReplace?.();
-        if (err) this.setWarning(err);
-        else this.close();
-      });
+      this.replaceBtn.addEventListener(
+        'click',
+        trusted(() => {
+          const err = this.h.onReplace?.();
+          if (err) this.setWarning(err);
+          else this.close();
+        }),
+      );
       foot.append(this.replaceBtn);
     }
     foot.append(this.copyBtn);
@@ -153,9 +177,9 @@ export class Panel {
     this.box.append(head, this.body, this.warn, foot);
     getRoot().appendChild(this.box);
     this.place(anchor);
-    this.keyHandler = (e: KeyboardEvent) => {
+    this.keyHandler = trusted((e: KeyboardEvent) => {
       if (e.key === 'Escape') this.close();
-    };
+    });
     document.addEventListener('keydown', this.keyHandler, true);
   }
 
@@ -226,7 +250,7 @@ export class SelectionIcon {
     this.btn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      onClick();
+      if (e.isTrusted) onClick();
     });
     getRoot().appendChild(this.btn);
   }
@@ -265,10 +289,10 @@ export class ProgressBar {
   private retry = el('button', '', '再試行');
   private close = el('button', 'x', '×');
   constructor(handlers: { onStop: () => void; onRestore: () => void; onRetry: () => void; onClose: () => void }) {
-    this.stop.addEventListener('click', handlers.onStop);
-    this.restore.addEventListener('click', handlers.onRestore);
-    this.retry.addEventListener('click', handlers.onRetry);
-    this.close.addEventListener('click', handlers.onClose);
+    this.stop.addEventListener('click', trusted(handlers.onStop));
+    this.restore.addEventListener('click', trusted(handlers.onRestore));
+    this.retry.addEventListener('click', trusted(handlers.onRetry));
+    this.close.addEventListener('click', trusted(handlers.onClose));
     this.close.title = '閉じる';
     this.close.setAttribute('aria-label', '閉じる');
     this.bar.setAttribute('role', 'status');

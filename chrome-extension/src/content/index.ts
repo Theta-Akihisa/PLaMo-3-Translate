@@ -3,7 +3,7 @@ import { loadSettings, onSettingsChanged } from '../core/settings';
 import { TARGET_LANGUAGES } from '../core/catalog';
 import { detectLanguage, smartTarget } from '../core/detect';
 import { TRUNCATED_WARNING, type RuntimeMessage } from '../core/protocol';
-import { Panel, SelectionIcon, isOwnNode } from './ui';
+import { Panel, SelectionIcon, isOwnNode, trusted } from './ui';
 import { PageTranslator } from './page-translate';
 
 let panel: Panel | null = null;
@@ -11,18 +11,19 @@ let current: TranslateHandle | null = null;
 let lastPointer = { x: 40, y: 40 };
 const page = new PageTranslator();
 
+// ページのスクリプトが合成したイベント (isTrusted = false) は無視する (trusted)
 document.addEventListener(
   'mouseup',
-  (e) => {
+  trusted((e: MouseEvent) => {
     lastPointer = { x: e.clientX, y: e.clientY };
-  },
+  }),
   true,
 );
 document.addEventListener(
   'contextmenu',
-  (e) => {
+  trusted((e: MouseEvent) => {
     lastPointer = { x: e.clientX, y: e.clientY };
-  },
+  }),
   true,
 );
 
@@ -224,13 +225,21 @@ function updateIcon(e?: MouseEvent): void {
   icon.show(useRect ? a.x + a.w + 4 : (e?.clientX ?? a.x) + 8, useRect ? a.y + a.h + 4 : (e?.clientY ?? a.y) + 8);
 }
 
-document.addEventListener('mouseup', (e) => setTimeout(() => updateIcon(e), 10), true);
-document.addEventListener('keyup', (e) => {
-  if (e.shiftKey || e.key === 'Shift') updateIcon();
-}, true);
-document.addEventListener('mousedown', (e) => {
-  if (!isOwnNode(e.target as Node)) icon?.hide();
-}, true);
+document.addEventListener('mouseup', trusted((e: MouseEvent) => setTimeout(() => updateIcon(e), 10)), true);
+document.addEventListener(
+  'keyup',
+  trusted((e: KeyboardEvent) => {
+    if (e.shiftKey || e.key === 'Shift') updateIcon();
+  }),
+  true,
+);
+document.addEventListener(
+  'mousedown',
+  trusted((e: MouseEvent) => {
+    if (!isOwnNode(e.target as Node)) icon?.hide();
+  }),
+  true,
+);
 document.addEventListener('scroll', () => icon?.hide(), true);
 
 chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse) => {

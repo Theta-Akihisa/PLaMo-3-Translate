@@ -32,7 +32,7 @@ npm run build        # dist/ に出力
 
 Chrome で `chrome://extensions` を開き、「デベロッパー モード」をオン → 「パッケージ化されていない拡張機能を読み込む」で `chrome-extension/dist` を選択します。
 
-開発用: `npm test`（ユニットテスト）、`npm run typecheck`、`npm run e2e`（Playwright E2E。macOS アプリのローカル API を模したモックサーバーを使用。モデル GGUF の置き場所は環境変数 `E2E_MODELS`、スクリーンショット出力先は `E2E_SCRATCH`）。
+開発用: `npm test`（ユニットテスト）、`npm run typecheck`、`npm run e2e`（Playwright E2E。macOS アプリのローカル API を模したモックサーバーを使用。モデル GGUF の置き場所は環境変数 `E2E_MODELS`、スクリーンショット出力先は `E2E_SCRATCH`）。E2E は `node build.mjs --e2e` で作るテスト用ビルド `dist-e2e/` を読み込みます（ページ内 UI の Shadow DOM を Playwright から調べられるよう open にしたもの。配布用の `dist/` は closed で、ページのスクリプトからは操作できません）。
 
 ### 旧バージョンからの更新
 
