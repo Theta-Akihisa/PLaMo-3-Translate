@@ -559,11 +559,43 @@ extension AppModel: APIBackend {
     }
 
     func apiStream(prompt: String, maxTokens: Int, stop: [String],
-                   switchTo: String?) async throws -> AsyncThrowingStream<String, Error> {
+                   switchTo: String?) async throws -> AsyncThrowingStream<APIStreamEvent, Error> {
         if let id = switchTo, id != settings.modelID { try apiSelectModel(id: id) }
         guard isCurrentModelInstalled else { throw APIError.modelNotInstalled(currentSpec.label) }
         try await ensureLoaded()
         guard let engine = translator.engine else { throw AppError.engineUnavailable }
-        return engine.complete(prompt: prompt, maxTokens: maxTokens, stop: stop)
+        return AppModel.apiEvents(engine.completeEvents(prompt: prompt, maxTokens: maxTokens, stop: stop))
+    }
+
+    /// Kit の CompletionEvent を API 用のイベントに変換する（メインスレッドを経由しない）。
+    /// プロンプト長超過は 400 invalid_request にする。
+    private nonisolated static func apiEvents(
+        _ inner: AsyncThrowingStream<CompletionEvent, Error>
+    ) -> AsyncThrowingStream<APIStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task.detached {
+                do {
+                    for try await event in inner {
+                        switch event {
+                        case .text(let s):
+                            continuation.yield(.text(s))
+                        case .finished(let reason):
+                            continuation.yield(.finished(reason == .length ? .length : .stop))
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: AppModel.apiError(for: error))
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private nonisolated static func apiError(for error: Error) -> Error {
+        if let e = error as? LlamaEngineError, case .promptTooLong = e {
+            return APIError.invalidRequest(e.localizedDescription)
+        }
+        return error
     }
 }

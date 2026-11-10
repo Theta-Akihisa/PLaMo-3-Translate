@@ -92,14 +92,29 @@ enum APIError: Error, Equatable {
     }
 }
 
+/// 生成が終わった理由（OpenAI 互換の `finish_reason`）
+enum APIFinishReason: String, Equatable, Sendable {
+    /// EOG・停止文字列で終わった
+    case stop
+    /// `max_tokens`（またはコンテキストの残り）に達して打ち切られた
+    case length
+}
+
+/// 生成ストリームの要素。テキスト差分の後に、ちょうど 1 回 `.finished` が来る。
+enum APIStreamEvent: Equatable, Sendable {
+    case text(String)
+    case finished(APIFinishReason)
+}
+
 /// ローカル API サーバが状態の取得・モデル切り替え・生成を依頼する相手（AppModel が準拠する）。
 @MainActor
 protocol APIBackend: AnyObject {
     func apiState() -> APIState
     /// 使用モデルを切り替える（アプリの設定にも反映）。未知なら `.unknownModel`、未ダウンロードなら `.modelNotInstalled` を投げる。
     func apiSelectModel(id: String) throws
-    /// 生のプロンプトを補完し、テキスト差分のストリームを返す。
+    /// 生のプロンプトを補完し、テキスト差分と終了理由のストリームを返す。
     /// `switchTo` が非 nil なら、先にそのモデルへ切り替えてから実行する。
+    /// プロンプトがコンテキストに収まらない場合は `.invalidRequest` を（ストリーム経由で）投げる。
     func apiStream(prompt: String, maxTokens: Int, stop: [String],
-                   switchTo: String?) async throws -> AsyncThrowingStream<String, Error>
+                   switchTo: String?) async throws -> AsyncThrowingStream<APIStreamEvent, Error>
 }

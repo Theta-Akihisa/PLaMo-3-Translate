@@ -154,12 +154,14 @@ curl -i http://127.0.0.1:18080/health -H 'Origin: https://example.com'
 - エラーは OpenAI 互換の `{"error":{"message":"…","type":"model_not_installed","code":409}}`（`type`: `forbidden_host` / `forbidden_origin` / `model_not_installed` / `invalid_request` / `not_found` / `server_error`）
 - `/v1/completions` の `model` に別のダウンロード済みモデル ID を指定すると、`/v1/models/select` と同様に切り替えてから実行します
 - 停止文字列は `<|plamo:tag|>` / `<|plamo:bos|>` が常に追加されます。温度は常に greedy（`temperature` は無視）
-- `finish_reason` は現状常に `"stop"`（エンジンが `max_tokens` 到達を区別して返さないため）
+- `finish_reason` は生成が `max_tokens`（またはコンテキストの残り）に達して打ち切られたら `"length"`、EOG・停止文字列で終わったら `"stop"`（非ストリーム・SSE とも）
+- `max_tokens`（別名 `n_predict` / `max_completion_tokens`）は省略・0 以下なら 2048、上限 8192 に丸めます。数値でない・巨大な値（`1e30` など）は `400 invalid_request`
+- プロンプトがコンテキスト長に収まらない場合は `400 invalid_request`
 - 旧バージョンの既定ポート 8080 のままだった設定は、初回起動時に 18080 へ移行します（8080 は拡張機能の「llama-server」バックエンドの既定）
 
 ## テスト
 
-`PlamoTranslate-macOS` スキームで ⌘U（`App/Tests/APIRouterTests.swift`: HTTP パーサ / Host・Origin 検査 / プリフライト / `/health`・`/v1/models`・`/v1/models/select` / モデル指定 / エラー形式）。
+`PlamoTranslate-macOS` スキームで ⌘U（`App/Tests/APIRouterTests.swift`: HTTP パーサ / Host・Origin 検査 / プリフライト / `/health`・`/v1/models`・`/v1/models/select` / モデル指定 / `max_tokens` の検証 / `finish_reason` / エラー形式）。
 
 ## トラブルシューティング
 

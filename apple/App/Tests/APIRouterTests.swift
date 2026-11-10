@@ -302,6 +302,78 @@ final class APIRouterTests: XCTestCase {
         XCTAssertEqual(errorType(none), "model_not_installed")
     }
 
+    func testMaxTokensParsing() {
+        func tokens(_ json: [String: Any], path: String = "/v1/completions") -> Int? {
+            guard case .generate(let c) = route(req("POST", path, json: json)) else { return nil }
+            return c.maxTokens
+        }
+        var base: [String: Any] = ["prompt": "P"]
+        XCTAssertEqual(tokens(base), APIRouter.defaultMaxTokens)              // 省略 → 既定
+        base["max_tokens"] = NSNull()
+        XCTAssertEqual(tokens(base), APIRouter.defaultMaxTokens)              // null → 既定
+        XCTAssertEqual(tokens(["prompt": "P", "max_tokens": 64]), 64)
+        XCTAssertEqual(tokens(["prompt": "P", "max_tokens": 64.9]), 64)       // 小数は切り捨て
+        XCTAssertEqual(tokens(["prompt": "P", "max_tokens": -1]), APIRouter.defaultMaxTokens)
+        XCTAssertEqual(tokens(["prompt": "P", "max_tokens": 0]), APIRouter.defaultMaxTokens)
+        XCTAssertEqual(tokens(["prompt": "P", "max_tokens": 100_000]), APIRouter.maxAllowedTokens)   // 上限に丸める
+        XCTAssertEqual(tokens(["prompt": "P", "n_predict": 128]), 128)
+        XCTAssertEqual(tokens(["prompt": "P", "max_completion_tokens": 32]), 32)
+        XCTAssertEqual(tokens(["prompt": "P", "max_tokens": 16, "n_predict": 999]), 16)   // max_tokens が優先
+
+        // 巨大な数値・文字列・真偽値・配列は 400 invalid_request（以前は 1e30 で Int(Double) がトラップした）
+        let chat: [String: Any] = ["messages": [["role": "user", "content": "Hello"]]]
+        let bads: [Any] = [1e30, -1e30, 1e300, "64", true, false, [64], ["n": 1]]
+        let payloads: [(String, [String: Any])] = [("/v1/completions", ["prompt": "P"]), ("/v1/chat/completions", chat)]
+        for bad in bads {
+            for (path, payload) in payloads {
+                for key in ["max_tokens", "n_predict", "max_completion_tokens"] {
+                    var json = payload
+                    json[key] = bad
+                    let r = respond(route(req("POST", path, json: json)))
+                    XCTAssertEqual(r?.status, 400, "\(path) \(key)=\(bad)")
+                    XCTAssertEqual(r.flatMap { errorType($0) }, "invalid_request", "\(path) \(key)=\(bad)")
+                }
+            }
+        }
+
+        // JSON では表せない値も直接確かめる
+        XCTAssertNil(APIRouter.intValue(Double.nan))
+        XCTAssertNil(APIRouter.intValue(Double.infinity))
+        XCTAssertNil(APIRouter.intValue(-Double.infinity))
+        XCTAssertNil(APIRouter.intValue(Double.greatestFiniteMagnitude))
+        XCTAssertNil(APIRouter.intValue(9.3e18))
+        XCTAssertNil(APIRouter.intValue(nil))
+        XCTAssertNil(APIRouter.intValue("12"))
+        XCTAssertNil(APIRouter.intValue(NSNumber(value: true)))
+        XCTAssertEqual(APIRouter.intValue(NSNumber(value: 42)), 42)
+        XCTAssertEqual(APIRouter.intValue(-3.7), -3)
+        XCTAssertEqual(APIRouter.intValue(NSDecimalNumber(string: "2048")), 2048)
+        if case .failure(let e) = APIRouter.maxTokens(["max_tokens": Double.nan]) {
+            XCTAssertEqual(e.status, 400)
+        } else {
+            XCTFail("NaN must be rejected")
+        }
+    }
+
+    func testFinishReasonShapes() {
+        let tc = GenerationCall(kind: .completion, prompt: "p", maxTokens: 1, stop: [], stream: false, model: "m")
+        let b = body(APIResponses.completion(call: tc, id: "cmpl-1", text: "訳", finish: APIFinishReason.length.rawValue))
+        XCTAssertEqual((b["choices"] as? [[String: Any]])?.first?["finish_reason"] as? String, "length")
+
+        let chat = GenerationCall(kind: .chat, prompt: "p", maxTokens: 1, stop: [], stream: true, model: "m")
+        let cb = body(APIResponses.completion(call: chat, id: "c", text: "x", finish: "length"))
+        XCTAssertEqual((cb["choices"] as? [[String: Any]])?.first?["finish_reason"] as? String, "length")
+        let tail = String(decoding: APIResponses.sseChunk(call: chat, id: "c", text: nil, finish: "length"), as: UTF8.self)
+        XCTAssertTrue(tail.contains("\"finish_reason\":\"length\""))
+        let stop = String(decoding: APIResponses.sseChunk(call: tc, id: "c", text: "", finish: APIFinishReason.stop.rawValue), as: UTF8.self)
+        XCTAssertTrue(stop.contains("\"finish_reason\":\"stop\""))
+
+        // プロンプト長超過はバックエンドが invalid_request に変換して投げる → 400
+        let tooLong = APIResponses.error(for: APIError.invalidRequest("入力が長すぎます"))
+        XCTAssertEqual(tooLong.status, 400)
+        XCTAssertEqual(errorType(tooLong), "invalid_request")
+    }
+
     func testNotFoundAndMethod() {
         let nf = respond(route(req("GET", "/nope")))!
         XCTAssertEqual(nf.status, 404)
