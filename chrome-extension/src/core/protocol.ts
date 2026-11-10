@@ -67,12 +67,23 @@ export type ClientToSw =
   | { op: 'start'; id: string; req: TranslateRequest }
   | { op: 'cancel'; id: string };
 
+/**
+ * 翻訳エラーの種類 (engine/local-server.ts の classifyError)。
+ * input / request はその段落だけの問題、fatal / unreachable はどの段落も失敗する。
+ */
+export type TranslateErrorKind = 'input' | 'request' | 'fatal' | 'unreachable' | 'other';
+
+/** 訳文が最大トークン数で途中で切れたときの警告 */
+export const TRUNCATED_WARNING =
+  '訳文が長さの上限で途中で切れています。設定の最大トークン数を増やすか、文を分けてください。';
+
 /** 'translate' ポート: Service Worker → クライアント */
 export type SwToClient =
   | { op: 'phase'; id: string; phase: 'queued' | 'preparing' | 'generating'; status?: EngineStatus }
   | { op: 'chunk'; id: string; text: string }
-  | { op: 'done'; id: string; text: string; ms: number }
-  | { op: 'error'; id: string; message: string; cancelled?: boolean };
+  /** truncated: finish_reason "length" (最大トークン数に達して途中で切れた。text は途中までの訳文) */
+  | { op: 'done'; id: string; text: string; ms: number; truncated?: boolean }
+  | { op: 'error'; id: string; message: string; cancelled?: boolean; kind?: TranslateErrorKind };
 
 export const PORT_TRANSLATE = 'plamo-translate';
 export const PORT_ENGINE_PREFIX = 'plamo-engine:';
@@ -118,5 +129,7 @@ export interface PageState {
   mode: 'idle' | 'translating' | 'translated';
   done: number;
   total: number;
+  /** 翻訳できずに飛ばした段落の数 (入力エラー・途中で切れた訳文・個別のエラー) */
+  skipped?: number;
   error?: string;
 }

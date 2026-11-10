@@ -59,8 +59,15 @@ describe('cleanOutput', () => {
     expect(cleanOutput('\nはい\n')).toBe('はい');
   });
   it('hides partial stop prefix while streaming', () => {
-    expect(cleanOutput('はい<|plamo:t')).toBe('はい');
-    expect(cleanOutput('1 < 2')).toBe('1 < 2');
+    expect(cleanOutput('はい<|plamo:t', true)).toBe('はい');
+    expect(cleanOutput('はい<', true)).toBe('はい');
+    expect(cleanOutput('1 < 2', true)).toBe('1 < 2');
+  });
+  it('keeps a legitimate trailing < / <| in the final text', () => {
+    expect(cleanOutput('a <')).toBe('a <');
+    expect(cleanOutput('記号 <|')).toBe('記号 <|');
+    expect(cleanOutput('x <|plamo:')).toBe('x <|plamo:');
+    expect(cleanOutput('はい<|plamo:tag|>input')).toBe('はい');
   });
 });
 

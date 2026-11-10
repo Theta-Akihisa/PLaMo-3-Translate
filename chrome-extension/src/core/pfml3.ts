@@ -117,8 +117,12 @@ export function buildPrompt(req: Pfml3Request): string {
   return p;
 }
 
-/** 出力末尾に残った停止文字列を除去し、前後の空白を落とす。 */
-export function cleanOutput(text: string): string {
+/**
+ * 出力から停止文字列以降を除去し、前後の空白を落とす。
+ * streaming = true (生成途中) のときは、末尾に見えている停止文字列の先頭部分 (`<`, `<|plamo:t` など) も隠す。
+ * 最終結果 (streaming = false) では隠さない: 訳文が正当に `<` で終わる場合があるため。
+ */
+export function cleanOutput(text: string, streaming = false): string {
   let out = text;
   let cut = -1;
   for (const s of STOP_STRINGS) {
@@ -126,8 +130,7 @@ export function cleanOutput(text: string): string {
     if (i >= 0 && (cut < 0 || i < cut)) cut = i;
   }
   if (cut >= 0) out = out.slice(0, cut);
-  else {
-    // ストリーミング途中で停止文字列の先頭だけが見えている場合も隠す
+  else if (streaming) {
     for (const s of STOP_STRINGS) {
       for (let n = s.length - 1; n > 0; n--) {
         if (out.endsWith(s.slice(0, n))) {

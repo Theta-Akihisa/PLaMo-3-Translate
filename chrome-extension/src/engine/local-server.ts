@@ -3,7 +3,8 @@
 // fetch は Service Worker からのみ行う (Origin: chrome-extension://<id> が付き、アプリの Origin 検査を通る)。
 import { normalizeEndpoint } from '../core/util';
 import { STOP } from '../core/catalog';
-import type { AppModel } from '../core/protocol';
+import { Pfml3Error } from '../core/pfml3';
+import type { AppModel, TranslateErrorKind } from '../core/protocol';
 
 export type ApiKind = 'app' | 'server';
 
@@ -35,6 +36,26 @@ export class UnreachableError extends Error {
     super(message);
     this.name = 'UnreachableError';
   }
+}
+
+/**
+ * 翻訳エラーを分類する (ページ翻訳が段落を飛ばすか中止するかの判断に使う)。
+ * - input: 入力が PFML3 として不正 (その段落だけの問題)
+ * - request: その 1 リクエストだけが拒否された 4xx (400 / 413 / 422 など)
+ * - fatal: どのリクエストも失敗する 4xx (Origin 拒否・モデル未ダウンロード・不明なモデルなど)
+ * - unreachable: アプリ / サーバーに接続できない
+ * - other: 5xx・接続の途中切断など
+ */
+export function classifyError(e: unknown): TranslateErrorKind {
+  if (e instanceof Pfml3Error) return 'input';
+  if (e instanceof UnreachableError) return 'unreachable';
+  if (e instanceof Error && e.name === 'TimeoutError') return 'unreachable';
+  if (e instanceof ApiError) {
+    const s = e.status;
+    if (s === 401 || s === 403 || s === 404 || s === 405 || s === 409) return 'fatal';
+    if (s >= 400 && s < 500) return 'request';
+  }
+  return 'other';
 }
 
 const NAME: Record<ApiKind, string> = { app: 'macOS アプリ', server: 'llama-server' };
@@ -210,6 +231,93 @@ export async function selectAppModel(endpoint: string, id: string): Promise<Heal
 
 // ---------------------------------------------------------------- /v1/completions
 
+/** /v1/completions の結果。truncated = finish_reason "length" (max_tokens に達して途中で切れた) */
+export interface CompletionResult {
+  text: string;
+  finishReason: string | null;
+  truncated: boolean;
+}
+
+/** ストリームが [DONE] / finish_reason を受け取る前に終わった (接続が途中で切れた) */
+export class IncompleteStreamError extends Error {
+  constructor(kind: ApiKind) {
+    super(`${NAME[kind]}からの応答が途中で途切れました（接続が切れました）。もう一度お試しください`);
+    this.name = 'IncompleteStreamError';
+  }
+}
+
+/**
+ * OpenAI 互換 /v1/completions の SSE ストリームを解釈する (純粋なロジック。テスト用に export)。
+ * - `data: {...}` の choices[0].text を連結し、finish_reason を記録する
+ * - `data: [DONE]` で完了。それ以降の行は無視する
+ * - 末尾に改行の無い最終行も end() で解釈する
+ */
+export class CompletionSseParser {
+  text = '';
+  finishReason: string | null = null;
+  done = false;
+  private buf = '';
+
+  constructor(private readonly kind: ApiKind = 'app') {}
+
+  /** 受信したテキストを追加する。テキストが増えたら true */
+  push(chunk: string): boolean {
+    this.buf += chunk;
+    let changed = false;
+    let idx: number;
+    while ((idx = this.buf.search(/\r\n|\r|\n/)) >= 0) {
+      const line = this.buf.slice(0, idx);
+      this.buf = this.buf.slice(this.buf.startsWith('\r\n', idx) ? idx + 2 : idx + 1);
+      if (this.line(line)) changed = true;
+    }
+    return changed;
+  }
+
+  /** ストリーム終端。改行で終わらなかった最終行を解釈する。テキストが増えたら true */
+  end(): boolean {
+    const rest = this.buf;
+    this.buf = '';
+    return rest ? this.line(rest) : false;
+  }
+
+  /** 完了した結果を返す。[DONE] も finish_reason も受け取っていなければ IncompleteStreamError */
+  result(): CompletionResult {
+    if (!this.done && this.finishReason === null) throw new IncompleteStreamError(this.kind);
+    return { text: this.text, finishReason: this.finishReason, truncated: this.finishReason === 'length' };
+  }
+
+  private line(raw: string): boolean {
+    if (this.done) return false;
+    const line = raw.trim();
+    if (!line.startsWith('data:')) return false;
+    const data = line.slice(5).trim();
+    if (data === '[DONE]') {
+      this.done = true;
+      return false;
+    }
+    let j: any;
+    try {
+      j = JSON.parse(data);
+    } catch {
+      return false;
+    }
+    if (j?.error) {
+      const e = j.error;
+      const msg = typeof e === 'string' ? e : String(e.message ?? JSON.stringify(e));
+      throw new ApiError(`${NAME[this.kind]}がエラーを返しました: ${msg}`, typeof e?.code === 'number' ? e.code : 500, e?.type);
+    }
+    const c = j?.choices?.[0];
+    const fr = c?.finish_reason;
+    if (typeof fr === 'string' && fr) this.finishReason = fr;
+    const t: unknown = c?.text;
+    if (typeof t === 'string' && t) {
+      this.text += t;
+      return true;
+    }
+    return false;
+  }
+}
+
 /** OpenAI 互換 /v1/completions (SSE ストリーム)。onText には累積テキストを渡す。 */
 export async function serverComplete(opts: {
   kind: ApiKind;
@@ -218,7 +326,7 @@ export async function serverComplete(opts: {
   maxTokens: number;
   signal: AbortSignal;
   onText: (accumulated: string) => void;
-}): Promise<string> {
+}): Promise<CompletionResult> {
   const res = await apiFetch(opts.kind, opts.endpoint, '/v1/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -238,33 +346,25 @@ export async function serverComplete(opts: {
 
   const reader = res.body.getReader();
   const dec = new TextDecoder();
-  let buf = '';
-  let acc = '';
+  const parser = new CompletionSseParser(opts.kind);
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.search(/\r?\n/)) >= 0) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(buf[idx] === '\r' ? idx + 2 : idx + 1);
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (data === '[DONE]') return acc;
-        try {
-          const j = JSON.parse(data);
-          if (j?.error) throw new Error(String(j.error.message ?? j.error));
-          const t: string | undefined = j?.choices?.[0]?.text;
-          if (t) {
-            acc += t;
-            opts.onText(acc);
-          }
-        } catch (e) {
-          if (e instanceof SyntaxError) continue;
-          throw e;
-        }
+      let r: ReadableStreamReadResult<Uint8Array>;
+      try {
+        r = await reader.read();
+      } catch (e) {
+        if (opts.signal.aborted) throw new AbortedError();
+        // 生成中にアプリが終了した・接続が切れた
+        throw new IncompleteStreamError(opts.kind);
       }
+      if (r.done) {
+        const a = parser.push(dec.decode());
+        const b = parser.end();
+        if (a || b) opts.onText(parser.text);
+        break;
+      }
+      if (parser.push(dec.decode(r.value, { stream: true }))) opts.onText(parser.text);
+      if (parser.done) break;
     }
   } catch (e) {
     if (opts.signal.aborted) throw new AbortedError();
@@ -273,5 +373,5 @@ export async function serverComplete(opts: {
     reader.cancel().catch(() => {});
   }
   if (opts.signal.aborted) throw new AbortedError();
-  return acc;
+  return parser.result();
 }
