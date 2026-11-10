@@ -125,11 +125,32 @@ export async function loadSettings(): Promise<Settings> {
   return settings;
 }
 
-export async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
-  const cur = await loadSettings();
-  const next = { ...cur, ...patch, version: SETTINGS_VERSION };
-  await chrome.storage.local.set({ [KEY]: next });
-  return next;
+let saveChain: Promise<unknown> = Promise.resolve();
+
+/** 拡張機能のページ / Service Worker 間で共有できる Web Locks (content script ではページのオリジンになるので使わない) */
+function extensionLocks(): LockManager | undefined {
+  const g = globalThis as { navigator?: { locks?: LockManager }; location?: { protocol?: string } };
+  return g.location?.protocol === 'chrome-extension:' ? g.navigator?.locks : undefined;
+}
+
+/**
+ * 設定の一部を保存する。読み込み→マージ→書き込みを直列化するので、同時に呼んでも更新が失われない
+ * (同じコンテキスト内はプロミスの連鎖で、拡張機能のページ同士は Web Locks で)。
+ */
+export function saveSettings(patch: Partial<Settings>): Promise<Settings> {
+  const write = async (): Promise<Settings> => {
+    const cur = await loadSettings();
+    const next = { ...cur, ...patch, version: SETTINGS_VERSION };
+    await chrome.storage.local.set({ [KEY]: next });
+    return next;
+  };
+  const locked = (): Promise<Settings> => {
+    const locks = extensionLocks();
+    return locks ? (locks.request('plamo-translate-settings', write) as Promise<Settings>) : write();
+  };
+  const p = saveChain.then(locked, locked);
+  saveChain = p.catch(() => {});
+  return p;
 }
 
 export function onSettingsChanged(cb: (s: Settings) => void): void {
