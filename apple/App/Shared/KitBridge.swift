@@ -16,6 +16,10 @@ import PlamoTranslateKit
 //  - TranslationSettings() が既定値で生成でき、全プロパティが var
 //  - Translator.load(model: ModelSpec, quant: String, contextLength: Int)
 //  - ModelStore.importLocalFile(url:)（macOS）
+//  - LlamaEngine.completeEvents(prompt:maxTokens:stop:) → CompletionEvent（.text / .finished(FinishReason)）
+//  - TranslatorError.outputTruncated（translate が全文を流した後、上限で切れていたら投げる）
+//  - DocumentProgress.truncatedParagraphs
+//  - Translator.load は新しい load に置き換えられると CancellationError を投げる
 // ============================================================
 
 enum AppError: LocalizedError {
@@ -32,6 +36,43 @@ enum AppError: LocalizedError {
     }
 }
 
+/// 長さの上限（最大トークン数）で訳文が途中で切れたときの警告
+enum TruncationWarning {
+    static let single = "訳文が長さの上限で途中で切れています。設定の最大トークン数を増やすか、文を分けてください。"
+
+    static func document(paragraphs n: Int) -> String {
+        "\(n) 個の段落で訳文が長さの上限で途中で切れています。設定の最大トークン数を増やすか、段落を分けてください。"
+    }
+}
+
+/// performTranslation の結果
+struct TranslationOutput: Equatable, Sendable {
+    var text: String
+    /// 長さの上限で途中で切れた段落の数（短文の翻訳では 0 か 1）
+    var truncatedParagraphs: Int = 0
+    /// 段落ごとに翻訳した（長文）
+    var isDocument = false
+    /// 実際に使った原文言語（明示 or 検出。不明なら nil）
+    var sourceLang: String?
+    /// 実際に使った訳文言語
+    var targetLang: String = ""
+
+    var isTruncated: Bool { truncatedParagraphs > 0 }
+
+    /// 途中で切れていれば UI に出す警告
+    var warning: String? {
+        guard isTruncated else { return nil }
+        return isDocument ? TruncationWarning.document(paragraphs: truncatedParagraphs) : TruncationWarning.single
+    }
+}
+
+/// 外部（URL スキーム・クイック翻訳パネル）から渡されたテキストで置き換える前の原文
+struct ReplacedSource: Equatable {
+    var previousText: String
+    /// 置き換えた依頼元（例: 「URL スキーム」）
+    var origin: String
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
@@ -39,6 +80,12 @@ final class AppModel: ObservableObject {
     /// この文字数を超える入力は translateDocument（段落分割）で翻訳する
     static let longTextThreshold = 1500
     static let historyCapacity = 100
+    /// 入力しながらの翻訳結果は、この時間そのままなら履歴に記録する（途中経過で履歴を埋めないため）
+    static let historySettleNanos: UInt64 = 4_000_000_000
+    /// 履歴の先頭がこの時間内の同じ文章の編集版なら、追加せずに置き換える
+    static let historyMergeWindow: TimeInterval = 10 * 60
+    /// 履歴ファイルへの書き込みをまとめる間隔
+    static let historySaveDelayNanos: UInt64 = 1_000_000_000
 
     private enum Keys {
         static let settings = "translationSettings.v1"
@@ -62,6 +109,10 @@ final class AppModel: ObservableObject {
     @Published var outputText = ""
     @Published var isTranslating = false
     @Published var errorMessage: String?
+    /// 訳文が長さの上限で途中で切れたなどの警告（訳文は表示したまま）
+    @Published private(set) var warningMessage: String?
+    /// 外部から渡されたテキストで原文を置き換えたときの「元に戻す」用
+    @Published private(set) var replacedSource: ReplacedSource?
 
     // ファイル読み込み（.txt / .md / .rtf / .pdf）
     /// ファイル選択ダイアログを開く要求（⌘O・ボタンから）
@@ -72,6 +123,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var loadedFileSummary: String?
     private var fileLoadTask: Task<Void, Never>?
     private var assigningFileText = false
+    /// replaceSource 中（ペースト・外部テキスト・ファイル・言語の入れ替えなど、入力以外での置き換え）
+    private var replacingSource = false
 
     // モデル管理の状態
     @Published private(set) var downloading: Set<String> = []
@@ -81,6 +134,11 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var history: [HistoryEntry]
+    private let historyFile: HistoryFile
+    private var historySaveTask: Task<Void, Never>?
+    /// まだ履歴に記録していない最新の翻訳結果（落ち着いたら記録）
+    private var pendingHistory: HistoryEntry?
+    private var historySettleTask: Task<Void, Never>?
 
     /// 入力しながら自動翻訳（DeepL 風）。デバウンス後に翻訳する
     @Published var liveTranslate: Bool {
@@ -96,7 +154,13 @@ final class AppModel: ObservableObject {
 
     private var sinks = Set<AnyCancellable>()
     private var translateTask: Task<Void, Never>?
+    /// 進行中のモデル読み込み（UI・クイック翻訳・API で共有する）
     private var loadTask: Task<Void, Error>?
+    /// loadTask が読み込んでいるモデルのキー
+    private var loadTaskKey: String?
+    /// loadTask を識別する番号（古いタスクが新しいタスクの状態を消さないように）
+    private var loadGeneration = 0
+    /// 読み込み済みのモデルのキー（読み込みタスクの中で設定する）
     private var loadedKey: String?
 
     init() {
@@ -115,8 +179,19 @@ final class AppModel: ObservableObject {
         self.settings = s
         self.quantChoices = (d.dictionary(forKey: Keys.quantChoices) as? [String: String]) ?? [:]
         self.liveTranslate = (d.object(forKey: Keys.live) as? Bool) ?? true
-        self.history = d.data(forKey: Keys.history)
-            .flatMap { try? JSONDecoder().decode([HistoryEntry].self, from: $0) } ?? []
+        let historyFile = HistoryFile()
+        self.historyFile = historyFile
+        if let saved = historyFile.load() {
+            self.history = saved
+        } else {
+            // 旧バージョン: UserDefaults に保存していた履歴をファイルへ移す
+            let legacy = d.data(forKey: Keys.history)
+                .flatMap { try? JSONDecoder().decode([HistoryEntry].self, from: $0) } ?? []
+            self.history = legacy
+            if !legacy.isEmpty { historyFile.saveNow(legacy) }
+            // 書き込めたときだけ旧データを消す（失敗したら次回また移す）
+            if legacy.isEmpty || historyFile.load() != nil { d.removeObject(forKey: Keys.history) }
+        }
 
         // 子オブジェクトの変更を View に伝える
         modelStore.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &sinks)
@@ -238,27 +313,73 @@ final class AppModel: ObservableObject {
 
     // MARK: - ロード / 解放
 
+    private static func loadKey(_ modelID: String, _ quant: String, _ contextLength: Int) -> String {
+        "\(modelID)|\(quant)|\(contextLength)"
+    }
+
+    /// 選択中のモデルを読み込む（読み込み済みなら何もしない）。
+    /// UI・クイック翻訳・ローカル API から同時に呼ばれても、同じモデルなら 1 つの読み込みを共有する。
+    /// 読み込み中に設定が変わって別の読み込みに置き換えられた場合は、その時点で必要なモデルを確かめ直す。
     func ensureLoaded() async throws {
-        let spec = currentSpec
-        let file = currentFile
-        guard modelStore.isInstalled(file) else { throw AppError.modelNotInstalled(spec.label) }
-        let ctx = settings.contextLength
-        let key = "\(spec.id)|\(file.quant)|\(ctx)"
-        if loadedKey == key, case .ready = translator.state { return }
-        if let pending = loadTask {
-            try await pending.value
-            if loadedKey == key { return }
+        for _ in 0..<4 {
+            let spec = currentSpec
+            let file = currentFile
+            guard modelStore.isInstalled(file) else { throw AppError.modelNotInstalled(spec.label) }
+            let ctx = settings.contextLength
+            let key = Self.loadKey(spec.id, file.quant, ctx)
+            if loadedKey == key, translator.engine != nil { return }
+
+            let task: Task<Void, Error>
+            if let pending = loadTask, loadTaskKey == key {
+                task = pending
+            } else {
+                task = startLoad(spec: spec, quant: file.quant, contextLength: ctx, key: key)
+            }
+            do {
+                try await task.value
+            } catch is CancellationError {
+                // 呼び出し元自身が中断されたのでなければ、新しい読み込み（設定変更など）に置き換えられただけ
+                try Task.checkCancellation()
+                continue
+            }
+            try Task.checkCancellation()
+            if loadedKey == key, translator.engine != nil { return }
+            // 読み込みの間に設定が変わった・エンジンが解放された → もう一度確かめる
         }
-        let t = Task { try await self.translator.load(model: spec, quant: file.quant, contextLength: ctx) }
-        loadTask = t
-        defer { loadTask = nil }
-        try await t.value
-        loadedKey = key
+        throw AppError.engineUnavailable
+    }
+
+    private func startLoad(spec: ModelSpec, quant: String, contextLength: Int, key: String) -> Task<Void, Error> {
+        loadGeneration += 1
+        let generation = loadGeneration
+        loadedKey = nil   // Translator.load は前のエンジンを解放する
+        let task = Task { [weak self] in
+            guard let self else { throw CancellationError() }
+            do {
+                try await self.translator.load(model: spec, quant: quant, contextLength: contextLength)
+                guard self.loadGeneration == generation else { return }
+                self.loadTask = nil
+                self.loadTaskKey = nil
+                if self.translator.engine != nil { self.loadedKey = key }
+            } catch {
+                if self.loadGeneration == generation {
+                    self.loadTask = nil
+                    self.loadTaskKey = nil
+                }
+                throw error
+            }
+        }
+        loadTask = task
+        loadTaskKey = key
+        return task
     }
 
     /// メモリ警告・モデル削除時にエンジンを解放する
     func releaseEngine() {
         stopTranslation()
+        loadGeneration += 1
+        loadTask = nil
+        loadTaskKey = nil
         loadedKey = nil
         translator.unload()
     }
@@ -266,23 +387,33 @@ final class AppModel: ObservableObject {
     /// iOS: バックグラウンド移行時は GPU を使えないので生成を止める
     func handleBackground() {
         stopTranslation()
+        flushHistory()
     }
 
     // MARK: - 翻訳
 
-    private func recentHistoryPairs(target: String, limit: Int) -> [HistoryPair] {
-        guard limit > 0 else { return [] }
-        let candidates = history.filter { $0.targetLang == target && $0.source.count <= 600 && $0.translation.count <= 1200 }
-        return candidates.prefix(limit).reversed().map { HistoryPair(source: $0.source, translation: $0.translation) }
+    /// 履歴から few-shot に使う（原文, 訳文）の組。
+    /// 原文言語・訳文言語の両方が一致するものだけを使い、いま翻訳する文章（とその編集前後の版）は除く。
+    private func recentHistoryPairs(text: String, sourceLang: String?, target: String, limit: Int) -> [HistoryPair] {
+        guard limit > 0, let sourceLang else { return [] }   // 原文言語が分からないときは使わない
+        var out: [HistoryPair] = []
+        for e in history {
+            if out.count >= limit { break }
+            guard e.targetLang == target, e.source.count <= 600, e.translation.count <= 1200 else { continue }
+            // 原文言語を明示していなかった古い履歴は、その場で検出する
+            guard (e.sourceLang ?? e.detectedLang ?? LanguageDetector.detect(e.source)) == sourceLang else { continue }
+            guard !HistoryRevision.isRevision(e.source, text) else { continue }
+            out.append(HistoryPair(source: e.source, translation: e.translation))
+        }
+        return out.reversed()   // 古い順
     }
 
-    private static func assembled(_ p: DocumentProgress) -> String { p.text }
-
     /// 翻訳の中核。onPartial には累積テキストが渡される。UI・メニューバー・ショートカット・サービスで共用。
+    /// 訳文が長さの上限で切れた場合も、途中までの訳文を返す（`TranslationOutput.isTruncated`）。
     func performTranslation(text: String,
                             targetLang: String? = nil,
                             useHistory: Bool = false,
-                            onPartial: @escaping (String) -> Void = { _ in }) async throws -> String {
+                            onPartial: @escaping (String) -> Void = { _ in }) async throws -> TranslationOutput {
         var s = settings
         let autoDetected = s.sourceLang == nil
         if autoDetected { s.sourceLang = LanguageDetector.detect(text) }
@@ -293,14 +424,24 @@ final class AppModel: ObservableObject {
         }
         if s.targetLang != "ja" { s.form = nil }
         try await ensureLoaded()
+        try Task.checkCancellation()
         var acc = ""
-        if text.count > Self.longTextThreshold {
-            for try await p in translator.translateDocument(text: text, settings: s) {
-                acc = Self.assembled(p)
-                onPartial(acc)
+        var truncated = 0
+        let isDocument = text.count > Self.longTextThreshold
+        if isDocument {
+            do {
+                for try await p in translator.translateDocument(text: text, settings: s) {
+                    acc = p.text
+                    truncated = p.truncatedParagraphs
+                    onPartial(acc)
+                }
+            } catch TranslatorError.outputTruncated {
+                truncated = max(truncated, 1)
             }
         } else {
-            let pairs = (useHistory && s.useHistory) ? recentHistoryPairs(target: s.targetLang, limit: s.historyLimit) : []
+            let pairs = (useHistory && s.useHistory)
+                ? recentHistoryPairs(text: text, sourceLang: s.sourceLang, target: s.targetLang, limit: s.historyLimit)
+                : []
             let req = TranslationRequest(text: text,
                                          targetLang: s.targetLang,
                                          sourceLang: s.sourceLang,
@@ -308,25 +449,42 @@ final class AppModel: ObservableObject {
                                          context: s.context.isEmpty ? nil : s.context,
                                          glossary: s.glossary,
                                          history: pairs)
-            for try await delta in translator.translate(req, maxTokens: s.maxTokens) {
-                acc += delta
-                onPartial(acc)
+            do {
+                for try await delta in translator.translate(req, maxTokens: s.maxTokens) {
+                    acc += delta
+                    onPartial(acc)
+                }
+            } catch TranslatorError.outputTruncated {
+                // 全文を流し終えた後に投げられる。途中までの訳文は acc に入っている
+                truncated = 1
             }
         }
         if Task.isCancelled { throw CancellationError() }
-        return acc.trimmingCharacters(in: .whitespacesAndNewlines)
+        return TranslationOutput(text: acc.trimmingCharacters(in: .whitespacesAndNewlines),
+                                 truncatedParagraphs: truncated, isDocument: isDocument,
+                                 sourceLang: s.sourceLang, targetLang: s.targetLang)
     }
 
     // MARK: ライブ翻訳
 
     private func sourceChanged(old: String) {
         if !assigningFileText { loadedFileSummary = nil }
-        guard !suppressLive, sourceText != old else { return }
+        guard sourceText != old else { return }
+        if !replacingSource { replacedSource = nil }   // 自分で編集したら「元に戻す」の案内は消す
+        let isEmpty = sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // 原文の置き換え・クリアなら直前の訳を履歴に記録し、入力途中の編集なら途中経過として捨てる
+        if replacingSource || isEmpty {
+            commitPendingHistory()
+        } else {
+            discardPendingHistory()
+        }
+        guard !suppressLive else { return }
         debounceTask?.cancel()
         stopTranslation()   // 編集されたら進行中の生成を中断
-        if sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if isEmpty {
             outputText = ""
             errorMessage = nil
+            warningMessage = nil
             detectedLang = nil
             return
         }
@@ -360,7 +518,7 @@ final class AppModel: ObservableObject {
         debounceTask = Task { [weak self] in
             if !immediate { try? await Task.sleep(nanoseconds: Self.liveDebounceNanos) }
             guard !Task.isCancelled, let self else { return }
-            self.startTranslation()
+            self.startTranslation(explicit: false)
         }
     }
 
@@ -370,23 +528,52 @@ final class AppModel: ObservableObject {
         scheduleTranslation(immediate: true)
     }
 
+    /// 入力以外で原文を置き換える（ペースト・外部テキスト・ファイル・言語の入れ替えなど）。すぐに翻訳する。
+    /// - Parameter origin: 外部から渡されたテキストのとき、その依頼元。入力済みの原文を置き換えたら元に戻せるようにする。
+    private func replaceSource(with text: String, origin: String? = nil) {
+        let previous = sourceText
+        replacingSource = true
+        immediateNext = true
+        sourceText = text
+        immediateNext = false
+        replacingSource = false
+        if let origin, previous != text, !previous.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            replacedSource = ReplacedSource(previousText: previous, origin: origin)
+        }
+    }
+
     /// クリップボードの内容を原文にして即翻訳（ペースト時は待たない）
     func pasteFromClipboard() {
         guard let s = Clipboard.paste(), !s.isEmpty else { return }
-        immediateNext = true
-        if s == sourceText { startTranslation() } else { sourceText = s }
-        immediateNext = false
+        if s == sourceText { startTranslation() } else { replaceSource(with: s) }
     }
 
-    /// 外部（URL スキーム・ダブルコピー等）から原文を渡して翻訳する
-    func translate(externalText: String) {
-        immediateNext = true
-        sourceText = externalText
-        immediateNext = false
+    /// 外部（URL スキーム・クイック翻訳パネル等）から原文を渡して翻訳する。
+    /// 入力済みの原文を置き換えた場合は、案内を出して元に戻せるようにする（`replacedSource`）。
+    func translate(externalText: String, from origin: String) {
+        if externalText == sourceText {
+            if !liveTranslate || (outputText.isEmpty && !isTranslating) { startTranslation() }
+            return
+        }
+        replaceSource(with: externalText, origin: origin)
         if !liveTranslate { startTranslation() }
     }
 
-    func startTranslation() {
+    /// 外部テキストで置き換える前の原文に戻す
+    func undoSourceReplacement() {
+        guard let r = replacedSource else { return }
+        replacedSource = nil
+        replaceSource(with: r.previousText)
+        if !liveTranslate { startTranslation() }
+    }
+
+    func dismissSourceReplacementNotice() {
+        replacedSource = nil
+    }
+
+    /// - Parameter explicit: 「翻訳」ボタン・⌘↩ など明示的な実行。結果をすぐ履歴に記録する
+    ///   （入力しながらの自動翻訳は、結果がしばらくそのままのときだけ記録する）。
+    func startTranslation(explicit: Bool = true) {
         let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         translateTask?.cancel()
@@ -394,18 +581,25 @@ final class AppModel: ObservableObject {
         let id = runID
         isTranslating = true
         errorMessage = nil
+        warningMessage = nil
         outputText = ""
-        let target = settings.targetLang
         let source = settings.sourceLang
         translateTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await self.performTranslation(text: text, useHistory: true) { [weak self] partial in
+                let output = try await self.performTranslation(text: text, useHistory: true) { [weak self] partial in
                     if let self, self.runID == id { self.outputText = partial }
                 }
                 if self.runID == id {
-                    self.outputText = result
-                    self.addHistory(source: text, translation: result, sourceLang: source, targetLang: target)
+                    self.outputText = output.text
+                    // 長さの上限で切れた訳は表示したまま警告し、履歴（＝次の翻訳の文脈）には残さない
+                    self.warningMessage = output.warning
+                    if !output.isTruncated {
+                        let entry = HistoryEntry(source: text, translation: output.text,
+                                                 sourceLang: source, targetLang: output.targetLang,
+                                                 detectedLang: source == nil ? output.sourceLang : nil)
+                        self.stageHistory(entry, settled: explicit)
+                    }
                 }
             } catch is CancellationError {
                 // 中断: 部分結果は残す
@@ -439,9 +633,7 @@ final class AppModel: ObservableObject {
                 guard let self, !Task.isCancelled else { return }
                 self.fileLoadProgress = nil
                 self.assigningFileText = true
-                self.immediateNext = true
-                self.sourceText = result.text
-                self.immediateNext = false
+                self.replaceSource(with: result.text)
                 self.assigningFileText = false
                 self.loadedFileSummary = result.summary
             } catch is CancellationError {
@@ -467,47 +659,159 @@ final class AppModel: ObservableObject {
         settings.targetLang = src
         if settings.targetLang != "ja" { settings.form = nil }
         if !outputText.isEmpty {
-            let o = outputText
-            immediateNext = true
-            sourceText = o
-            immediateNext = false
+            replaceSource(with: outputText)
         }
     }
 
     // MARK: - 履歴
 
-    private func addHistory(source: String, translation: String, sourceLang: String?, targetLang: String) {
-        guard !translation.isEmpty, source.count <= 20_000 else { return }
-        if let first = history.first, first.source == source, first.targetLang == targetLang { history.removeFirst() }
-        history.insert(HistoryEntry(source: source, translation: translation,
-                                    sourceLang: sourceLang, targetLang: targetLang), at: 0)
+    /// 翻訳結果を履歴の候補にする。`settled` ならすぐ記録し、そうでなければ一定時間そのままなら記録する。
+    private func stageHistory(_ entry: HistoryEntry, settled: Bool) {
+        historySettleTask?.cancel()
+        pendingHistory = entry
+        if settled {
+            commitPendingHistory()
+            return
+        }
+        historySettleTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.historySettleNanos)
+            guard !Task.isCancelled, let self else { return }
+            self.commitPendingHistory()
+        }
+    }
+
+    /// 表示中の訳を履歴に記録する（コピー・共有・保存、原文のクリア・置き換え、バックグラウンド移行時など）
+    func commitPendingHistory() {
+        historySettleTask?.cancel()
+        historySettleTask = nil
+        guard let entry = pendingHistory else { return }
+        pendingHistory = nil
+        addHistory(entry)
+    }
+
+    private func discardPendingHistory() {
+        historySettleTask?.cancel()
+        historySettleTask = nil
+        pendingHistory = nil
+    }
+
+    private func addHistory(_ entry: HistoryEntry) {
+        guard !entry.translation.isEmpty, entry.source.count <= 20_000 else { return }
+        // 同じ原文、または直前に記録した原文の編集版（書き足し・手直し）なら、先頭を置き換える
+        if let first = history.first, first.targetLang == entry.targetLang,
+           first.source == entry.source
+            || (entry.date.timeIntervalSince(first.date) < Self.historyMergeWindow
+                && HistoryRevision.isRevision(first.source, entry.source)) {
+            history.removeFirst()
+        }
+        history.insert(entry, at: 0)
         if history.count > Self.historyCapacity { history.removeLast(history.count - Self.historyCapacity) }
-        saveHistory()
+        scheduleHistorySave()
     }
 
     func deleteHistory(at offsets: IndexSet) {
         history.remove(atOffsets: offsets)
-        saveHistory()
+        scheduleHistorySave()
     }
 
     func clearHistory() {
+        discardPendingHistory()
         history = []
-        saveHistory()
+        scheduleHistorySave()
     }
 
     func restore(_ entry: HistoryEntry) {
+        commitPendingHistory()
         suppressLive = true
         sourceText = entry.source
         suppressLive = false
         stopTranslation()
         outputText = entry.translation
+        errorMessage = nil
+        warningMessage = nil
         settings.sourceLang = entry.sourceLang
         settings.targetLang = entry.targetLang
     }
 
-    private func saveHistory() {
-        if let data = try? JSONEncoder().encode(history) {
-            UserDefaults.standard.set(data, forKey: Keys.history)
+    /// 履歴の書き込みはまとめて、メインスレッドの外で行う
+    private func scheduleHistorySave() {
+        historySaveTask?.cancel()
+        historySaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.historySaveDelayNanos)
+            guard !Task.isCancelled, let self else { return }
+            self.historySaveTask = nil
+            self.historyFile.save(self.history)
+        }
+    }
+
+    /// 未記録の訳を記録し、履歴をすぐにファイルへ書き込む（終了・バックグラウンド移行時）
+    func flushHistory() {
+        commitPendingHistory()
+        guard historySaveTask != nil else { return }
+        historySaveTask?.cancel()
+        historySaveTask = nil
+        historyFile.saveNow(history)
+    }
+}
+
+/// 2 つの原文が「同じ文章の書き足し・手直し」かどうか
+enum HistoryRevision {
+    /// 共通の先頭 + 末尾が、長い方のこの割合以上なら同じ文章の編集とみなす
+    static let minOverlap = 0.6
+
+    static func isRevision(_ a: String, _ b: String) -> Bool {
+        let x = a.trimmingCharacters(in: .whitespacesAndNewlines)
+        let y = b.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !x.isEmpty, !y.isEmpty else { return false }
+        if x == y || x.hasPrefix(y) || y.hasPrefix(x) { return true }
+        let ca = Array(x), cb = Array(y)
+        let n = min(ca.count, cb.count)
+        var prefix = 0
+        while prefix < n, ca[prefix] == cb[prefix] { prefix += 1 }
+        var suffix = 0
+        while suffix < n - prefix, ca[ca.count - 1 - suffix] == cb[cb.count - 1 - suffix] { suffix += 1 }
+        return Double(prefix + suffix) >= minOverlap * Double(max(ca.count, cb.count))
+    }
+}
+
+/// 翻訳履歴の保存先（Application Support/<バンドル ID>/history.json）。
+/// エンコードと書き込みは専用のキューで行い、メインスレッドを止めない。
+final class HistoryFile: Sendable {
+    let url: URL
+    private let queue = DispatchQueue(label: "plamotranslate.history", qos: .utility)
+
+    init() {
+        let base = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                 appropriateFor: nil, create: true))
+            ?? FileManager.default.temporaryDirectory
+        let folder = Bundle.main.bundleIdentifier ?? "PlamoTranslate"
+        url = base.appendingPathComponent(folder, isDirectory: true).appendingPathComponent("history.json")
+    }
+
+    /// 保存済みの履歴。ファイルが無ければ nil
+    func load() -> [HistoryEntry]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONDecoder().decode([HistoryEntry].self, from: data)) ?? []
+    }
+
+    /// バックグラウンドで書き込む（呼んだ順に書かれるので、最後の内容が残る）
+    func save(_ entries: [HistoryEntry]) {
+        let url = self.url
+        queue.async { Self.write(entries, to: url) }
+    }
+
+    /// すぐに書き込む（それまでに頼んだ書き込みも済ませる）
+    func saveNow(_ entries: [HistoryEntry]) {
+        let url = self.url
+        queue.sync { Self.write(entries, to: url) }
+    }
+
+    private static func write(_ entries: [HistoryEntry], to url: URL) {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(entries).write(to: url, options: [.atomic])
+        } catch {
+            // 書き込めなくても翻訳は続けられる（次回の保存で再試行）
         }
     }
 }
@@ -527,7 +831,8 @@ extension AppModel: APIBackend {
 
     private var isCurrentModelLoaded: Bool {
         guard case .ready(let id) = translator.state, id == currentSpec.id else { return false }
-        return loadedKey == "\(currentSpec.id)|\(currentFile.quant)|\(settings.contextLength)"
+        return translator.engine != nil
+            && loadedKey == Self.loadKey(currentSpec.id, currentFile.quant, settings.contextLength)
     }
 
     func apiState() -> APIState {

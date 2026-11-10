@@ -112,6 +112,21 @@ struct TranslateView: View {
                     }
                 }
             }
+            if let r = model.replacedSource {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.uturn.backward.circle").foregroundStyle(.secondary)
+                    Text("\(r.origin)から渡されたテキストで原文を置き換えました")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    Spacer()
+                    Button("元に戻す") { model.undoSourceReplacement() }.controlSize(.small)
+                    Button { model.dismissSourceReplacementNotice() } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .help("閉じる")
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
+            }
             if let p = model.fileLoadProgress {
                 HStack(spacing: 8) {
                     ProgressView(value: p).frame(maxWidth: 160)
@@ -263,9 +278,17 @@ struct TranslateView: View {
             TextSizeMenu()
             ScrollSyncToggle()
             if !model.outputText.isEmpty {
-                Button { Clipboard.copy(model.outputText) } label: { Label("コピー", systemImage: "doc.on.doc") }
+                // コピー・共有・保存した訳は「使った訳」なので、すぐ履歴に記録する
+                Button {
+                    Clipboard.copy(model.outputText)
+                    model.commitPendingHistory()
+                } label: { Label("コピー", systemImage: "doc.on.doc") }
                 ShareLink(item: model.outputText) { Label("共有", systemImage: "square.and.arrow.up") }
-                Button { showExporter = true } label: { Label("訳文を保存", systemImage: "square.and.arrow.down") }
+                    .simultaneousGesture(TapGesture().onEnded { model.commitPendingHistory() })
+                Button {
+                    model.commitPendingHistory()
+                    showExporter = true
+                } label: { Label("訳文を保存", systemImage: "square.and.arrow.down") }
             }
         }
         .labelStyle(.iconOnly)
@@ -288,6 +311,14 @@ struct TranslateView: View {
             targetToolbar
             if let err = model.errorMessage {
                 Text(err).foregroundStyle(.red).font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 17)
+                    .padding(.bottom, 4)
+            }
+            if let warning = model.warningMessage {
+                // 訳文が長さの上限で切れた: 途中までの訳文は下に表示したまま
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange).font(.callout)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 17)
                     .padding(.bottom, 4)

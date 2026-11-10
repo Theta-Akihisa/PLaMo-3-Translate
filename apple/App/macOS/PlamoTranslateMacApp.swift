@@ -59,7 +59,7 @@ enum MacURLHandler {
             func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
             if let t = value("target"), model.targetLanguages.contains(where: { $0.code == t }) { model.settings.targetLang = t }
             if let s = value("source"), model.sourceLanguages.contains(where: { $0.code == s }) { model.settings.sourceLang = s }
-            if let text = value("text"), !text.isEmpty { model.translate(externalText: text) }
+            if let text = value("text"), !text.isEmpty { model.translate(externalText: text, from: "URL スキーム") }
         default:
             // "open" など: アプリを前面に出し、拡張機能が接続できるよう API サーバを待ち受け状態にする
             LocalAPIController.shared.ensureRunning()
@@ -118,5 +118,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         AppModel.shared.stopTranslation()
+        AppModel.shared.flushHistory()
     }
 }

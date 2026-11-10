@@ -36,7 +36,9 @@ struct TranslateTextIntent: AppIntent {
             throw IntentError.message("翻訳するテキストが空です。")
         }
         let result = try await model.performTranslation(text: input, targetLang: targetLanguage.rawValue)
-        return .result(value: result, dialog: IntentDialog(stringLiteral: result))
+        // 長さの上限で途中で切れた場合も、途中までの訳文を返し、ダイアログで知らせる
+        let dialog = result.warning.map { "\($0)\n\n\(result.text)" } ?? result.text
+        return .result(value: result.text, dialog: IntentDialog(stringLiteral: dialog))
     }
 }
 

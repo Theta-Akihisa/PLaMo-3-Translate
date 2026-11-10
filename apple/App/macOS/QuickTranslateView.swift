@@ -9,6 +9,8 @@ struct QuickTranslateView: View {
     @State private var input = ""
     @State private var output = ""
     @State private var error: String?
+    /// 訳文が長さの上限で途中で切れたときの警告（途中までの訳文は表示したまま）
+    @State private var warning: String?
     @State private var busy = false
     @State private var task: Task<Void, Never>?
 
@@ -46,6 +48,7 @@ struct QuickTranslateView: View {
             ScrollView {
                 VStack(alignment: .leading) {
                     if let error { Text(error).foregroundStyle(.red) }
+                    if let warning { Label(warning, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.callout) }
                     Text(output).translationTextFont().textSelection(.enabled)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -88,10 +91,13 @@ struct QuickTranslateView: View {
         guard !text.isEmpty, !busy else { return }
         busy = true
         error = nil
+        warning = nil
         output = ""
         task = Task {
             do {
-                output = try await model.performTranslation(text: text) { output = $0 }
+                let result = try await model.performTranslation(text: text) { output = $0 }
+                output = result.text
+                warning = result.warning
             } catch is CancellationError {
             } catch {
                 self.error = error.localizedDescription

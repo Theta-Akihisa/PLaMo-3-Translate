@@ -73,8 +73,11 @@ struct HistoryEntry: Identifiable, Codable, Equatable {
     var date = Date()
     var source: String
     var translation: String
+    /// 原文言語の指定（nil = 自動検出）
     var sourceLang: String?
     var targetLang: String
+    /// 自動検出だったときに検出された原文言語（履歴を文脈に使うときの言語の照合用）
+    var detectedLang: String?
 }
 
 // MARK: - 共通ビュー部品
