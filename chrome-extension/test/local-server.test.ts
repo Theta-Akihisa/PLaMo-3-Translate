@@ -115,6 +115,28 @@ describe('serverComplete', () => {
     await expect(run()).rejects.toBeInstanceOf(IncompleteStreamError);
   });
 
+  it('503 unavailable (model switch in the app) -> waits and retries once', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: { message: 'モデル切り替え中', type: 'unavailable', code: 503 } }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+        .mockResolvedValueOnce(sseResponse([chunk('訳', 'stop'), 'data: [DONE]\n\n']));
+      vi.stubGlobal('fetch', fetchMock);
+      const p = run();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(await p).toEqual({ text: '訳', finishReason: 'stop', truncated: false });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('final line without newline at end of body', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => sseResponse([chunk('a'), 'data: {"choices":[{"text":"b","finish_reason":"stop"}]}'])));
     expect(await run()).toEqual({ text: 'ab', finishReason: 'stop', truncated: false });

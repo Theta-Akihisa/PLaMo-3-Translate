@@ -319,14 +319,38 @@ export class CompletionSseParser {
 }
 
 /** OpenAI 互換 /v1/completions (SSE ストリーム)。onText には累積テキストを渡す。 */
-export async function serverComplete(opts: {
+type CompleteOptions = {
   kind: ApiKind;
   endpoint: string;
   prompt: string;
   maxTokens: number;
   signal: AbortSignal;
   onText: (accumulated: string) => void;
-}): Promise<CompletionResult> {
+};
+
+/** 503 unavailable（アプリがモデルの切り替え・解放で生成を中断した）のときに再試行するまでの待ち時間 */
+export const UNAVAILABLE_RETRY_DELAY_MS = 1500;
+
+/**
+ * 補完を 1 回実行する。macOS アプリがモデル切り替えのために生成を中断した場合（503 `unavailable`、
+ * shared/local-api.md）は、少し待ってから 1 回だけ再試行する。
+ */
+export async function serverComplete(opts: CompleteOptions): Promise<CompletionResult> {
+  try {
+    return await serverCompleteOnce(opts);
+  } catch (e) {
+    if (!(e instanceof ApiError && e.status === 503 && (e.type === 'unavailable' || opts.kind === 'app'))) throw e;
+    if (opts.signal.aborted) throw new AbortedError();
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(resolve, UNAVAILABLE_RETRY_DELAY_MS);
+      opts.signal.addEventListener('abort', () => { clearTimeout(t); reject(new AbortedError()); }, { once: true });
+    });
+    opts.onText('');
+    return serverCompleteOnce(opts);
+  }
+}
+
+async function serverCompleteOnce(opts: CompleteOptions): Promise<CompletionResult> {
   const res = await apiFetch(opts.kind, opts.endpoint, '/v1/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
