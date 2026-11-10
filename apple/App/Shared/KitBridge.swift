@@ -122,6 +122,8 @@ final class AppModel: ObservableObject {
     /// 直前に読み込んだファイルの説明（原文を編集すると消える）
     @Published private(set) var loadedFileSummary: String?
     private var fileLoadTask: Task<Void, Never>?
+    /// 読み込みごとの番号（古い読み込みが新しい読み込みの進み具合を動かしたり消したりしないように）
+    private var fileLoadID = 0
     private var assigningFileText = false
     /// replaceSource 中（ペースト・外部テキスト・ファイル・言語の入れ替えなど、入力以外での置き換え）
     private var replacingSource = false
@@ -624,7 +626,9 @@ final class AppModel: ObservableObject {
     /// 文字列を取り出す（ドラッグ&ドロップ / ファイル読み込み用）
     /// ファイル（.txt / .md / .rtf / .pdf）を読み込んで原文にする。PDF は段落に組み直し、スキャンページは文字認識する。
     func loadText(from url: URL) {
-        fileLoadTask?.cancel()
+        fileLoadTask?.cancel()   // 前の読み込み（PDF の文字認識など）も止まる
+        fileLoadID += 1
+        let loadID = fileLoadID
         stopTranslation()
         errorMessage = nil
         fileLoadProgress = 0
@@ -632,26 +636,30 @@ final class AppModel: ObservableObject {
             do {
                 let result = try await FileTextLoader.load(url: url) { p in
                     Task { @MainActor [weak self] in
-                        if self?.fileLoadProgress != nil { self?.fileLoadProgress = p }
+                        guard let self, self.fileLoadID == loadID, self.fileLoadProgress != nil else { return }
+                        self.fileLoadProgress = p
                     }
                 }
-                guard let self, !Task.isCancelled else { return }
+                guard let self, self.fileLoadID == loadID, !Task.isCancelled else { return }
+                self.fileLoadTask = nil
                 self.fileLoadProgress = nil
                 self.assigningFileText = true
                 self.replaceSource(with: result.text)
                 self.assigningFileText = false
                 self.loadedFileSummary = result.summary
-            } catch is CancellationError {
-                self?.fileLoadProgress = nil
             } catch {
-                guard let self else { return }
+                // 中止された・別のファイルの読み込みが始まった場合は、新しい読み込みの状態に触れない
+                guard let self, self.fileLoadID == loadID else { return }
+                self.fileLoadTask = nil
                 self.fileLoadProgress = nil
-                self.errorMessage = error.localizedDescription
+                if !(error is CancellationError) { self.errorMessage = error.localizedDescription }
             }
         }
     }
 
+    /// 「中止」: 読み込みを止める（バックグラウンドの PDF 処理・文字認識もページ単位で止まる）
     func cancelFileLoad() {
+        fileLoadID += 1
         fileLoadTask?.cancel()
         fileLoadTask = nil
         fileLoadProgress = nil
