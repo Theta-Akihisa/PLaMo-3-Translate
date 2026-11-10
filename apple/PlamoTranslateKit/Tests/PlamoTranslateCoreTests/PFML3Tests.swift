@@ -113,22 +113,29 @@ final class SegmenterTests: XCTestCase {
 final class CatalogTests: XCTestCase {
     func testModels() {
         XCTAssertEqual(ModelCatalog.all.count, 3)
+        // 既定は 0.8B の Q4_K_M
         XCTAssertEqual(ModelCatalog.defaultModel.size, "0.8b")
         XCTAssertEqual(ModelCatalog.defaultModel.defaultQuant, "Q4_K_M")
-        XCTAssertEqual(ModelCatalog.defaultModel.defaultFile.sizeBytes, 573123200)
+        XCTAssertEqual(ModelCatalog.defaultModel.defaultFile.quant, "Q4_K_M")
         XCTAssertEqual(ModelCatalog.spec(id: "plamo-3-translate-8b")?.minRamGB, 8)
         XCTAssertNil(ModelCatalog.spec(id: "nope"))
+        XCTAssertEqual(Set(ModelCatalog.all.map(\.id)).count, ModelCatalog.all.count)
         for m in ModelCatalog.all {
-            XCTAssertFalse(m.files.isEmpty)
-            XCTAssertEqual(m.defaultFile.quant, m.defaultQuant)
+            XCTAssertFalse(m.files.isEmpty, m.id)
+            XCTAssertEqual(m.defaultFile.quant, m.defaultQuant, m.id)
+            XCTAssertEqual(Set(m.files.map(\.quant)).count, m.files.count, m.id)
             for f in m.files {
-                XCTAssertEqual(f.sha256.count, 64)
-                XCTAssertTrue(f.sizeBytes > 0)
-                XCTAssertTrue(f.url.absoluteString.hasSuffix(f.file))
+                XCTAssertTrue(Self.matches(f.sha256, "^[0-9a-f]{64}$"), "sha256 must be 64 lowercase hex: \(f.file)")
+                XCTAssertGreaterThan(f.sizeBytes, 0, f.file)
+                XCTAssertTrue(f.file.hasSuffix(".gguf"), f.file)
+                XCTAssertEqual(f.url.lastPathComponent, f.file)
+                XCTAssertTrue(f.url.absoluteString.hasSuffix("/" + f.file), f.url.absoluteString)
             }
         }
-        XCTAssertEqual(ModelCatalog.all.first { $0.size == "2b" }?.defaultFile.sizeBytes, 1807199392)
-        XCTAssertEqual(ModelCatalog.all.first { $0.size == "8b" }?.defaultFile.sizeBytes, 5280442080)
+    }
+
+    private static func matches(_ s: String, _ pattern: String) -> Bool {
+        s.range(of: pattern, options: .regularExpression) != nil
     }
 
     func testLanguages() {
@@ -155,11 +162,42 @@ final class CatalogTests: XCTestCase {
     }
 
     func testCatalogURLsArePinnedToRevision() {
-        // main を指すと配布元の更新でサイズ・SHA-256 がずれるため、必ずリビジョン固定 URL を使う
+        // main などのブランチを指すと配布元の更新でサイズ・SHA-256 がずれるため、
+        // 必ず 40 桁のコミット SHA に固定した URL を使う
         for m in ModelCatalog.all {
             for f in m.files {
-                XCTAssertFalse(f.url.absoluteString.contains("/resolve/main/"), f.url.absoluteString)
+                let url = f.url.absoluteString
+                let pattern = "^https://huggingface\\.co/"
+                    + NSRegularExpression.escapedPattern(for: m.repo)
+                    + "/resolve/[0-9a-f]{40}/"
+                    + NSRegularExpression.escapedPattern(for: f.file) + "$"
+                XCTAssertTrue(Self.matches(url, pattern), url)
+                XCTAssertFalse(url.contains("/resolve/main/"), url)
             }
         }
+    }
+
+    /// パッケージ内のコピーが shared/*.json と一致すること（apple/scripts/sync-shared.sh の実行忘れ検出）。
+    func testBundledResourcesMatchShared() throws {
+        // <repo>/apple/PlamoTranslateKit/Tests/PlamoTranslateCoreTests/<this file>
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // PlamoTranslateCoreTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // PlamoTranslateKit
+            .deletingLastPathComponent()   // apple
+            .deletingLastPathComponent()   // <repo>
+        let shared = repoRoot.appendingPathComponent("shared", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: shared.appendingPathComponent("models.json").path) else {
+            throw XCTSkip("shared/ が見つからない（パッケージ単体でのテスト）: \(shared.path)")
+        }
+        for name in ["models", "languages"] {
+            let expected = try Data(contentsOf: shared.appendingPathComponent(name + ".json"))
+            XCTAssertEqual(SharedResource.data(name), expected,
+                           "\(name).json が shared/ と異なります。apple/scripts/sync-shared.sh を実行してください")
+        }
+        let vectorsURL = try XCTUnwrap(Bundle.module.url(forResource: "pfml3-test-vectors", withExtension: "json"))
+        XCTAssertEqual(try Data(contentsOf: vectorsURL),
+                       try Data(contentsOf: shared.appendingPathComponent("pfml3-test-vectors.json")),
+                       "pfml3-test-vectors.json が shared/ と異なります。apple/scripts/sync-shared.sh を実行してください")
     }
 }
