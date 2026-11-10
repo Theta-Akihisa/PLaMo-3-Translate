@@ -43,6 +43,9 @@ public final class ModelStore: ObservableObject {
     private var jobs: [String: DownloadJob] = [:]
     private let fm = FileManager.default
 
+    /// 一時ファイル（ダウンロード・インポート途中）の接頭辞。モデルディレクトリ内に作る
+    private static let stagingPrefixes = [".download-", ".import-"]
+
     /// Application Support/PlamoTranslate/Models
     public nonisolated static var modelsDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -51,6 +54,16 @@ public final class ModelStore: ObservableObject {
     }
 
     private var resumeDirectory: URL { Self.modelsDirectory.appendingPathComponent(".partial", isDirectory: true) }
+
+    /// 再開データは SHA-256 をキーにする（同名でも中身の違うファイルの続きを取りに行かないように）。
+    private func resumeURL(for file: ModelFile) -> URL {
+        resumeDirectory.appendingPathComponent(file.sha256.lowercased() + ".resume")
+    }
+
+    /// 旧形式（ファイル名キー）の再開データ。読まずに削除する。
+    private func legacyResumeURL(for file: ModelFile) -> URL {
+        resumeDirectory.appendingPathComponent(file.file + ".resume")
+    }
 
     public init() {
         prepareDirectory()
@@ -64,6 +77,11 @@ public final class ModelStore: ObservableObject {
         var v = URLResourceValues()
         v.isExcludedFromBackup = true
         try? dir.setResourceValues(v)
+        // 前回の異常終了などで残った一時ファイルを掃除する
+        let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+        for name in names where Self.stagingPrefixes.contains(where: { name.hasPrefix($0) }) {
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+        }
     }
 
     public func refresh() {
@@ -92,12 +110,14 @@ public final class ModelStore: ObservableObject {
     }
 
     /// ダウンロード → SHA-256 検証 → 原子的に配置。失敗時は throw（`downloads` にも反映）。
+    /// `cancelDownload` または呼び出し元タスクのキャンセルで中止できる（`downloads` からは消え、エラーは throw される）。
     public func download(_ file: ModelFile) async throws {
         guard jobs[file.file] == nil else { throw ModelStoreError.alreadyDownloading }
         if isInstalled(file) { return }
 
-        let resumeURL = resumeDirectory.appendingPathComponent(file.file + ".resume")
-        let resumeData = try? Data(contentsOf: resumeURL)
+        let resumeFile = resumeURL(for: file)
+        try? fm.removeItem(at: legacyResumeURL(for: file))
+        let resumeData = try? Data(contentsOf: resumeFile)
         // 再開データがあれば部分ダウンロード分は差し引かない（安全側で全量を要求）
         let required = file.sizeBytes + 256 * 1024 * 1024
         if let avail = availableCapacity(), avail < required {
@@ -117,47 +137,72 @@ public final class ModelStore: ObservableObject {
         downloads[name] = .downloading(progress: 0)
         let dest = localURL(for: file)
         let dir = Self.modelsDirectory
+        var staged: URL?   // 配置前の一時ファイル。失敗時に必ず消す
 
         do {
             let tmp = try await job.start(stagingDirectory: dir)
-            try? fm.removeItem(at: resumeURL)
+            staged = tmp
+            try? fm.removeItem(at: resumeFile)
+            if job.wasCancelled { throw CancellationError() }
+            try Task.checkCancellation()
+
             downloads[name] = .verifying
             let expectedSize = file.sizeBytes, expectedHash = file.sha256
-            try await Task.detached(priority: .utility) {
-                let attrs = try FileManager.default.attributesOfItem(atPath: tmp.path)
-                let actualSize = (attrs[.size] as? NSNumber)?.int64Value ?? -1
-                guard actualSize == expectedSize else {
-                    try? FileManager.default.removeItem(at: tmp)
-                    throw ModelStoreError.sizeMismatch(expected: expectedSize, actual: actualSize)
-                }
-                let hash = try Self.sha256Hex(of: tmp)
-                guard hash.caseInsensitiveCompare(expectedHash) == .orderedSame else {
-                    try? FileManager.default.removeItem(at: tmp)
-                    throw ModelStoreError.checksumMismatch(name)
-                }
-            }.value
+            let verifier = Task.detached(priority: .utility) {
+                try Self.verify(tmp, expectedSize: expectedSize, expectedHash: expectedHash, name: name)
+            }
+            job.onCancel { verifier.cancel() }   // 検証中の cancelDownload でも止める
+            try await withTaskCancellationHandler {
+                try await verifier.value
+            } onCancel: {
+                verifier.cancel()
+            }
+            if job.wasCancelled { throw CancellationError() }
+            try Task.checkCancellation()
+
             // 原子的に配置（既存があれば置換）
             if fm.fileExists(atPath: dest.path) {
                 _ = try fm.replaceItemAt(dest, withItemAt: tmp)
             } else {
                 try fm.moveItem(at: tmp, to: dest)
             }
+            staged = nil
             jobs[name] = nil
             downloads[name] = nil
             refresh()
         } catch {
+            if let staged { try? fm.removeItem(at: staged) }
             jobs[name] = nil
             if let data = job.resumeData {
-                try? data.write(to: resumeURL)
+                try? data.write(to: resumeFile)
             } else {
-                try? fm.removeItem(at: resumeURL)   // 壊れた再開データを残さない
+                try? fm.removeItem(at: resumeFile)   // 使えない（使い終えた）再開データを残さない
             }
-            if job.wasCancelledByUser {
+            // 中止の操作があっても、実際のエラーが中止由来でなければ失敗として表示する
+            if Self.isCancellation(error) && (job.wasCancelled || Task.isCancelled) {
                 downloads[name] = nil
             } else {
                 downloads[name] = .failed(error.localizedDescription)
             }
             throw error
+        }
+    }
+
+    private nonisolated static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        return (error as? URLError)?.code == .cancelled
+    }
+
+    /// サイズと SHA-256 を検証する（タスクのキャンセルで中断）。
+    private nonisolated static func verify(_ url: URL, expectedSize: Int64, expectedHash: String, name: String) throws {
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let actualSize = (attrs[.size] as? NSNumber)?.int64Value ?? -1
+        guard actualSize == expectedSize else {
+            throw ModelStoreError.sizeMismatch(expected: expectedSize, actual: actualSize)
+        }
+        let hash = try sha256Hex(of: url)
+        guard hash.caseInsensitiveCompare(expectedHash) == .orderedSame else {
+            throw ModelStoreError.checksumMismatch(name)
         }
     }
 
@@ -167,7 +212,8 @@ public final class ModelStore: ObservableObject {
     }
 
     public func delete(_ file: ModelFile) throws {
-        try? fm.removeItem(at: resumeDirectory.appendingPathComponent(file.file + ".resume"))
+        try? fm.removeItem(at: resumeURL(for: file))
+        try? fm.removeItem(at: legacyResumeURL(for: file))
         if fm.fileExists(atPath: localURL(for: file).path) {
             try fm.removeItem(at: localURL(for: file))
         }
@@ -194,15 +240,26 @@ public final class ModelStore: ObservableObject {
         try await Task.detached(priority: .utility) {
             let fm = FileManager.default
             let fh = try FileHandle(forReadingFrom: url)
-            let magic = try fh.read(upToCount: 4)
-            try fh.close()
+            let magic: Data?
+            do {
+                magic = try fh.read(upToCount: 4)
+                try? fh.close()
+            } catch {
+                try? fh.close()
+                throw error
+            }
             guard magic == Data("GGUF".utf8) else { throw ModelStoreError.invalidGGUF }
             let tmp = dir.appendingPathComponent(".import-\(UUID().uuidString)")
-            try fm.copyItem(at: url, to: tmp)
-            if fm.fileExists(atPath: dest.path) {
-                _ = try fm.replaceItemAt(dest, withItemAt: tmp)
-            } else {
-                try fm.moveItem(at: tmp, to: dest)
+            do {
+                try fm.copyItem(at: url, to: tmp)
+                if fm.fileExists(atPath: dest.path) {
+                    _ = try fm.replaceItemAt(dest, withItemAt: tmp)
+                } else {
+                    try fm.moveItem(at: tmp, to: dest)
+                }
+            } catch {
+                try? fm.removeItem(at: tmp)   // コピー途中・置換失敗の一時ファイルを残さない
+                throw error
             }
         }.value
         refresh()
@@ -212,11 +269,13 @@ public final class ModelStore: ObservableObject {
     // MARK: - SHA-256
 
     /// 4MiB ずつ読み込むストリーミング SHA-256（GB 級ファイルでもメモリを食わない）。
+    /// 実行中のタスクがキャンセルされると `CancellationError` を投げる。
     nonisolated static func sha256Hex(of url: URL) throws -> String {
         let fh = try FileHandle(forReadingFrom: url)
         defer { try? fh.close() }
         var hasher = SHA256()
         while true {
+            try Task.checkCancellation()
             let chunk: Data? = try autoreleasepool { try fh.read(upToCount: 4 * 1024 * 1024) }
             guard let data = chunk, !data.isEmpty else { break }
             hasher.update(data: data)
@@ -233,6 +292,7 @@ private final class DownloadJob: NSObject, URLSessionDownloadDelegate, @unchecke
     private let onProgress: @Sendable (Double) -> Void
     private let lock = NSLock()
 
+    // 以下は lock で保護する
     private var continuation: CheckedContinuation<URL, Error>?
     private var session: URLSession?
     private var task: URLSessionDownloadTask?
@@ -241,10 +301,12 @@ private final class DownloadJob: NSObject, URLSessionDownloadDelegate, @unchecke
     private var moveError: Error?
     private var _resumeData: Data?
     private var _cancelled = false
+    private var cancelHandlers: [@Sendable () -> Void] = []
     private var lastReport = Date.distantPast
 
     var resumeData: Data? { lock.lock(); defer { lock.unlock() }; return _resumeData }
-    var wasCancelledByUser: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
+    /// `cancel()`（ユーザー操作または呼び出し元タスクのキャンセル）が呼ばれたか
+    var wasCancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
 
     init(url: URL, resumeData: Data?, onProgress: @escaping @Sendable (Double) -> Void) {
         self.url = url
@@ -252,28 +314,59 @@ private final class DownloadJob: NSObject, URLSessionDownloadDelegate, @unchecke
         self.onProgress = onProgress
     }
 
+    /// ダウンロードして、モデルディレクトリ内の一時ファイル（`.download-*`）の URL を返す。
+    /// 呼び出し元タスクのキャンセルでも中止する（再開データを残す）。
     func start(stagingDirectory: URL) async throws -> URL {
-        self.stagingDirectory = stagingDirectory
-        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<URL, Error>) in
-            lock.lock()
-            continuation = c
-            let cfg = URLSessionConfiguration.default
-            cfg.timeoutIntervalForRequest = 60
-            cfg.waitsForConnectivity = true
-            let s = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
-            session = s
-            let t: URLSessionDownloadTask
-            if let d = initialResumeData { t = s.downloadTask(withResumeData: d) } else { t = s.downloadTask(with: url) }
-            task = t
-            lock.unlock()
-            t.resume()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<URL, Error>) in
+                lock.lock()
+                self.stagingDirectory = stagingDirectory
+                continuation = c
+                let cfg = URLSessionConfiguration.default
+                cfg.timeoutIntervalForRequest = 60
+                cfg.waitsForConnectivity = true
+                let s = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
+                session = s
+                let t: URLSessionDownloadTask
+                if let d = initialResumeData { t = s.downloadTask(withResumeData: d) } else { t = s.downloadTask(with: url) }
+                task = t
+                // task の設定前に cancel() されていた場合、その cancel() は task を取り消せていない
+                let cancelledEarly = _cancelled
+                lock.unlock()
+                t.resume()
+                if cancelledEarly { cancelProducingResumeData(t) }
+            }
+        } onCancel: {
+            self.cancel()
         }
     }
 
     func cancel() {
-        lock.lock(); _cancelled = true; let t = task; lock.unlock()
-        t?.cancel(byProducingResumeData: { [weak self] data in
-            guard let self else { return }
+        lock.lock()
+        _cancelled = true
+        let t = task
+        let handlers = cancelHandlers
+        cancelHandlers.removeAll()
+        lock.unlock()
+        for h in handlers { h() }
+        if let t { cancelProducingResumeData(t) }
+    }
+
+    /// cancel() 時に呼ぶ処理を登録する（既に cancel 済みなら即座に呼ぶ）。
+    func onCancel(_ handler: @escaping @Sendable () -> Void) {
+        lock.lock()
+        if _cancelled {
+            lock.unlock()
+            handler()
+            return
+        }
+        cancelHandlers.append(handler)
+        lock.unlock()
+    }
+
+    private func cancelProducingResumeData(_ t: URLSessionDownloadTask) {
+        t.cancel(byProducingResumeData: { [weak self] data in
+            guard let self, let data else { return }
             self.lock.lock(); self._resumeData = data; self.lock.unlock()
         })
     }
@@ -308,7 +401,9 @@ private final class DownloadJob: NSObject, URLSessionDownloadDelegate, @unchecke
             lock.lock(); moveError = ModelStoreError.httpStatus(http.statusCode); lock.unlock()
             return
         }
+        lock.lock()
         let dir = stagingDirectory ?? FileManager.default.temporaryDirectory
+        lock.unlock()
         let staged = dir.appendingPathComponent(".download-\(UUID().uuidString)")
         do {
             try FileManager.default.moveItem(at: location, to: staged)
@@ -321,12 +416,17 @@ private final class DownloadJob: NSObject, URLSessionDownloadDelegate, @unchecke
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         lock.lock()
         let file = movedFile, mErr = moveError
+        movedFile = nil
         if let error, _resumeData == nil,
            let d = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
             _resumeData = d
         }
         lock.unlock()
-        if let error { finish(.failure(error)); return }
+        if let error {
+            if let file { try? FileManager.default.removeItem(at: file) }
+            finish(.failure(error))
+            return
+        }
         if let mErr { finish(.failure(mErr)); return }
         if let file { finish(.success(file)) } else { finish(.failure(URLError(.unknown))) }
     }
