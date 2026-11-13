@@ -90,6 +90,12 @@ final class ScrollSyncController: ObservableObject {
     private func sync(from side: Side) {
         let otherSide: Side = side == .source ? .target : .source
         guard let from = view(side), let to = view(otherSide) else { return }
+        isSyncing = true
+        defer { isSyncing = false }
+        // レイアウトが途中だと本文の高さ・スクロールできる範囲が実際より短く、相手が途中で止まる・ずれる。
+        // 全体をレイアウトしてから測る（済んでいれば軽い）。
+        TextViewGeometry.ensureLayout(of: from)
+        TextViewGeometry.ensureLayout(of: to)
         let aOffset = TextViewGeometry.scrollOffset(of: from)
         let aMax = TextViewGeometry.maxScrollOffset(of: from)
         let bMax = TextViewGeometry.maxScrollOffset(of: to)
@@ -98,8 +104,6 @@ final class ScrollSyncController: ObservableObject {
         let units = needsUnits ? unitOffsets(from: side, from, to: otherSide, to) : nil
         guard let y = ScrollMapping.mappedOffset(aOffset: aOffset, aMax: aMax, bMax: bMax, units: units) else { return }
         guard abs(y - TextViewGeometry.scrollOffset(of: to)) >= 0.5 else { return }
-        isSyncing = true
-        defer { isSyncing = false }
         TextViewGeometry.setScrollOffset(y, of: to)
     }
 
@@ -249,6 +253,9 @@ enum TextViewGeometry {
         v.setContentOffset(CGPoint(x: v.contentOffset.x, y: y - v.adjustedContentInset.top), animated: false)
     }
     static func contentHeight(of v: UITextView) -> CGFloat { v.contentSize.height }
+    static func ensureLayout(of v: UITextView) {
+        v.layoutManager.ensureLayout(for: v.textContainer)
+    }
     static func yOffset(ofCharacterAt index: Int, in v: UITextView) -> CGFloat {
         lineTop(ofCharacterAt: index, layoutManager: v.layoutManager, textLength: v.textStorage.length) + v.textContainerInset.top
     }
@@ -260,14 +267,23 @@ enum TextViewGeometry {
     static func scrollOffset(of v: NSTextView) -> CGFloat { v.enclosingScrollView?.contentView.bounds.origin.y ?? 0 }
     static func maxScrollOffset(of v: NSTextView) -> CGFloat {
         guard let sv = v.enclosingScrollView else { return 0 }
-        return max(0, v.frame.height - sv.contentView.bounds.height)
+        return max(0, contentHeight(of: v) - sv.contentView.bounds.height)
+    }
+    static func ensureLayout(of v: NSTextView) {
+        guard let lm = v.layoutManager, let tc = v.textContainer else { return }
+        lm.ensureLayout(for: tc)
     }
     static func setScrollOffset(_ y: CGFloat, of v: NSTextView) {
         guard let sv = v.enclosingScrollView else { return }
         sv.contentView.scroll(to: NSPoint(x: sv.contentView.bounds.origin.x, y: y))
         sv.reflectScrolledClipView(sv.contentView)
     }
-    static func contentHeight(of v: NSTextView) -> CGFloat { v.frame.height }
+    /// 本文の高さ。テキストビューの枠がまだレイアウトに追いついていない場合はレイアウト結果から求める
+    static func contentHeight(of v: NSTextView) -> CGFloat {
+        guard let lm = v.layoutManager, let tc = v.textContainer else { return v.frame.height }
+        let used = lm.usedRect(for: tc).maxY + v.textContainerOrigin.y + v.textContainerInset.height
+        return max(v.frame.height, used)
+    }
     static func yOffset(ofCharacterAt index: Int, in v: NSTextView) -> CGFloat {
         guard let lm = v.layoutManager, let storage = v.textStorage else { return 0 }
         return lineTop(ofCharacterAt: index, layoutManager: lm, textLength: storage.length) + v.textContainerOrigin.y
@@ -302,6 +318,8 @@ struct SyncedTextView: UIViewRepresentable {
         v.alwaysBounceVertical = true
         v.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 16, right: 12)
         v.adjustsFontForContentSizeCategory = false   // 倍率は SwiftUI 側（Dynamic Type × ユーザー倍率）で計算済み
+        // 既定の部分レイアウトだと未表示部分の高さが推定値になり、連動先の位置がずれる
+        v.layoutManager.allowsNonContiguousLayout = false
         // ファイルのドロップは SwiftUI 側（原文ペイン）で受ける
         v.interactions.removeAll { $0 is UIDropInteraction }
         v.font = .systemFont(ofSize: fontSize)
@@ -360,7 +378,10 @@ struct SyncedTextView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = SyncScrollView()
+        // ツールバー下に潜り込む場合の自動インセットを使わない（スクロール位置の計算をずらさない）
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsetsZero
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
@@ -393,7 +414,7 @@ struct SyncedTextView: NSViewRepresentable {
         scroll.documentView = v
 
         scroll.contentView.postsBoundsChangedNotifications = true
-        context.coordinator.observe(scroll.contentView)
+        context.coordinator.observe(scroll)
         controller.register(v, as: side)
         return scroll
     }
@@ -429,6 +450,7 @@ struct SyncedTextView: NSViewRepresentable {
         /// このテキストビュー専用の取り消し履歴（ウィンドウ共有のものを消さずに済むように）
         let undoManager = UndoManager()
         private var observer: NSObjectProtocol?
+        private var liveScrollObserver: NSObjectProtocol?
         /// プログラムからの変更中（その間のスクロール位置の変化はユーザー操作ではない）
         private var programmaticDepth = 0
         private var lastOrigin: CGFloat = 0
@@ -439,6 +461,7 @@ struct SyncedTextView: NSViewRepresentable {
 
         deinit {
             if let observer { NotificationCenter.default.removeObserver(observer) }
+            if let liveScrollObserver { NotificationCenter.default.removeObserver(liveScrollObserver) }
         }
 
         func performProgrammaticChange(_ change: () -> Void) {
@@ -448,8 +471,11 @@ struct SyncedTextView: NSViewRepresentable {
         }
 
         @MainActor
-        func observe(_ clip: NSClipView) {
+        func observe(_ scroll: SyncScrollView) {
+            let clip = scroll.contentView
             record(clip)
+            // ホイール・トラックパッド（慣性を含む）でのスクロール。イベントごとに確実に連動させる
+            scroll.onUserScroll = { [weak self] in self?.userDidScroll() }
             observer = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
             ) { [weak self] note in
@@ -458,6 +484,19 @@ struct SyncedTextView: NSViewRepresentable {
                     self.clipBoundsDidChange(clip)
                 }
             }
+            // スクロールバーのつまみのドラッグなど、ユーザー操作によるライブスクロール
+            liveScrollObserver = NotificationCenter.default.addObserver(
+                forName: NSScrollView.didLiveScrollNotification, object: scroll, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.userDidScroll() }
+            }
+        }
+
+        /// ユーザー操作で確実にスクロールされた（ホイール・トラックパッド・スクロールバー）
+        @MainActor
+        func userDidScroll() {
+            guard programmaticDepth == 0, !parent.controller.isSyncing else { return }
+            parent.controller.didScroll(parent.side)
         }
 
         @MainActor
@@ -467,7 +506,8 @@ struct SyncedTextView: NSViewRepresentable {
             lastDocumentHeight = clip.documentView?.frame.height ?? 0
         }
 
-        /// 表示位置が変わった。ユーザーのスクロールのときだけ連動させる
+        /// 表示位置が変わった（キーボードでのスクロール・カーソル移動に伴う自動スクロールなど）。
+        /// ホイール・トラックパッド・スクロールバーは onUserScroll / didLiveScroll で受けるので、ここは補助。
         @MainActor
         private func clipBoundsDidChange(_ clip: NSClipView) {
             let origin = clip.bounds.origin.y
@@ -478,8 +518,11 @@ struct SyncedTextView: NSViewRepresentable {
             guard origin != lastOrigin else { return }
             // こちらで動かした（連動・文字列の置き換え・文字サイズ変更）
             guard programmaticDepth == 0, !parent.controller.isSyncing else { return }
-            // ウィンドウの大きさ・文字列の長さが変わったことによる位置の補正
-            guard size == lastClipSize, documentHeight == lastDocumentHeight else { return }
+            // ウィンドウの大きさが変わったことによる位置の補正
+            guard size == lastClipSize else { return }
+            // 文字列が短くなって末尾に合わせ直された（ユーザー操作ではない）。
+            // 逆に、長い文書でスクロール中にレイアウトが進んで高さが伸びるのは普通なので、その場合は連動させる
+            guard documentHeight >= lastDocumentHeight else { return }
             parent.controller.didScroll(parent.side)
         }
 
@@ -494,6 +537,17 @@ struct SyncedTextView: NSViewRepresentable {
         func undoManager(for view: NSTextView) -> UndoManager? {
             undoManager
         }
+    }
+}
+
+/// ホイール・トラックパッドのスクロールを（慣性スクロールも含めて）1 イベントずつ知らせる NSScrollView。
+/// 境界の変化通知だけでは、長い文書でレイアウトが進んで高さが変わる最中のスクロールを見分けられないため。
+final class SyncScrollView: NSScrollView {
+    var onUserScroll: (() -> Void)?
+
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+        onUserScroll?()
     }
 }
 #endif
