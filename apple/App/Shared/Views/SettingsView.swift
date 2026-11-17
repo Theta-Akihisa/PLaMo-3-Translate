@@ -35,10 +35,11 @@ struct TranslationSettingsView: View {
                 }
                 Button("翻訳履歴を消去", role: .destructive) { confirmClear = true }
                     .disabled(model.history.isEmpty)
+                Button("翻訳キャッシュを消去") { model.clearTranslationCache() }
             } header: {
                 Text("履歴")
             } footer: {
-                Text("訳語や文体が揃いやすくなります。履歴は端末内にのみ保存されます。")
+                Text("訳語や文体が揃いやすくなります。履歴は端末内にのみ保存されます。翻訳キャッシュは、入力しながらの翻訳で変更していない段落の訳を使い回すためのものです。消去すると次の翻訳ではすべて訳し直します。")
             }
 
             Section {
