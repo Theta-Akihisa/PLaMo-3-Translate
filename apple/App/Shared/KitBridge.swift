@@ -128,6 +128,9 @@ final class AppModel: ObservableObject {
     @Published var outputText = ""
     /// 表示中の訳文は編集前の原文のもの（新しい訳の最初の途中経過が届くまで、前の訳を表示しておく）
     @Published private(set) var isOutputStale = false
+    /// 直前に終わった段落ごとの翻訳の結果（原文・訳・段落対応）。文章の途中を編集したとき、
+    /// 編集した段落の訳が流れている間に後ろの段落の前回の訳を仮に並べるのに使う（`TailSplice`）
+    private var lastDocumentResult: OutputAlignment?
     /// 入力しながらの翻訳を待っている（デバウンス中）
     @Published private(set) var isLiveUpdatePending = false
     /// 進行中の翻訳で、キャッシュの訳を使い回した段落の数（「変更された段落だけ翻訳中」の表示用）
@@ -589,6 +592,7 @@ final class AppModel: ObservableObject {
         stopTranslation()   // 編集されたら進行中の生成を中断（訳文は消さない）
         if isEmpty {
             outputText = ""
+            lastDocumentResult = nil
             isOutputStale = false
             errorMessage = nil
             warningMessage = nil
@@ -703,6 +707,8 @@ final class AppModel: ObservableObject {
         if reusedParagraphs != 0 { reusedParagraphs = 0 }
         if !outputText.isEmpty, !isOutputStale { isOutputStale = true }
         let source = settings.sourceLang
+        // 前の訳を表示しているなら、その段落ごとの訳を後ろの段落の仮表示に使う
+        let spliceBase = isOutputStale ? lastDocumentResult : nil
         translateTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -710,11 +716,20 @@ final class AppModel: ObservableObject {
                                                                onProgress: { [weak self] p in
                     guard let self, self.runID == id else { return }
                     if self.reusedParagraphs != p.reusedParagraphs { self.reusedParagraphs = p.reusedParagraphs }
-                    // 前の訳を表示している間は、それより情報の少ない途中経過（空・前の訳の先頭部分のまま）では書き換えない
-                    guard LiveOutputPolicy.acceptsProgress(p.text, previous: self.isOutputStale ? self.outputText : nil)
-                    else { return }
+                    // 編集した段落の訳が流れている間も、後ろの変わっていない段落は前回の訳を並べておく（消えない）
+                    var shownText = p.text
+                    var shownSegments = p.alignment
                     if let segments = p.alignment {
-                        let pending = PendingOutput(text: p.text, segments: segments, source: display, sourceShift: sourceShift)
+                        let spliced = TailSplice.splice(progressText: p.text, progressSegments: segments,
+                                                        source: text, previous: spliceBase)
+                        shownText = spliced.text
+                        shownSegments = spliced.segments
+                    }
+                    // 前の訳を表示している間は、それより情報の少ない途中経過（空・前の訳の先頭部分のまま）では書き換えない
+                    guard LiveOutputPolicy.acceptsProgress(shownText, previous: self.isOutputStale ? self.outputText : nil)
+                    else { return }
+                    if let segments = shownSegments {
+                        let pending = PendingOutput(text: shownText, segments: segments, source: display, sourceShift: sourceShift)
                         if self.isOutputStale {
                             // 前の訳から新しい訳へは待たずに書き換える（変わっていない段落はそのまま、末尾だけが変わる）
                             self.cancelPendingOutput()
@@ -738,6 +753,7 @@ final class AppModel: ObservableObject {
                         ? Self.makeAlignment(source: display, sourceShift: sourceShift,
                                              target: output.text, segments: output.alignment)
                         : nil
+                    self.lastDocumentResult = self.outputAlignment
                     // 長さの上限で切れた訳は表示したまま警告し、履歴（＝次の翻訳の文脈）には残さない
                     self.warningMessage = output.warning
                     if !output.isTruncated {
@@ -757,6 +773,7 @@ final class AppModel: ObservableObject {
                         self.isOutputStale = false
                         self.outputText = ""
                         self.outputAlignment = nil
+                        self.lastDocumentResult = nil
                     }
                     self.errorMessage = error.localizedDescription
                 }

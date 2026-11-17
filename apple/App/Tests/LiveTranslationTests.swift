@@ -139,3 +139,68 @@ final class LiveOutputPolicyTests: XCTestCase {
         XCTAssertEqual(edit?.replacement, "New")
     }
 }
+
+/// 文章の途中を編集したとき、後ろの変わっていない段落に前回の訳を仮に並べる
+final class TailSpliceTests: XCTestCase {
+    private func u(_ s: String) -> Int { s.utf16.count }
+
+    /// 原文と段落ごとの訳から、Kit と同じ形の段落対応を作る（区切りは原文の空行をそのまま使う）
+    private func assemble(_ source: String, _ outputs: [String]) -> (text: String, segments: [SegmentAlignment]) {
+        var text = "", segments: [SegmentAlignment] = [], offset = 0, i = 0
+        for segment in TextSegmenter.segments(source) {
+            let piece: String
+            switch segment { case .text(let s): piece = s; case .separator(let s): piece = s }
+            if DocumentAssembler.isTranslatable(segment) {
+                let out = outputs[i]; i += 1
+                segments.append(SegmentAlignment(sourceLocation: offset, sourceLength: u(piece),
+                                                 targetLocation: u(text), targetLength: u(out), isComplete: true))
+                text += out
+            } else {
+                text += piece
+            }
+            offset += u(piece)
+        }
+        return (text, segments)
+    }
+
+    func testKeepsUnchangedTailWhileEditedParagraphStreams() {
+        let oldSource = "A one.\n\nB two.\n\nC three 😀."
+        let old = assemble(oldSource, ["あ", "い", "う😀"])
+        let previous = OutputAlignment(source: oldSource, target: old.text, segments: old.segments)
+        let newSource = "A one.\n\nB two edited.\n\nC three 😀."
+        let partial = "い（編"
+        let progress = "あ\n\n" + partial
+        let progressSegments = [
+            SegmentAlignment(sourceLocation: 0, sourceLength: 6, targetLocation: 0, targetLength: 1, isComplete: true),
+            SegmentAlignment(sourceLocation: 8, sourceLength: u("B two edited."), targetLocation: 3,
+                             targetLength: u(partial), isComplete: false),
+        ]
+        let r = TailSplice.splice(progressText: progress, progressSegments: progressSegments,
+                                  source: newSource, previous: previous)
+        XCTAssertEqual(r.text, "あ\n\nい（編\n\nう😀")
+        XCTAssertEqual(r.segments.count, 3)
+        let last = r.segments[2]
+        XCTAssertTrue(last.isComplete)
+        XCTAssertEqual((r.text as NSString).substring(with: NSRange(location: last.targetLocation, length: last.targetLength)), "う😀")
+        XCTAssertEqual((newSource as NSString).substring(with: NSRange(location: last.sourceLocation, length: last.sourceLength)),
+                       "C three 😀.")
+    }
+
+    func testStopsAtFirstChangedParagraphAndWithoutPrevious() {
+        let oldSource = "A one.\n\nB two.\n\nC three."
+        let old = assemble(oldSource, ["あ", "い", "う"])
+        let previous = OutputAlignment(source: oldSource, target: old.text, segments: old.segments)
+        let progressSegments = [
+            SegmentAlignment(sourceLocation: 0, sourceLength: 6, targetLocation: 0, targetLength: 1, isComplete: true),
+        ]
+        // 後ろの段落も変わっている: 前回の訳は使えない
+        let changed = TailSplice.splice(progressText: "あ", progressSegments: progressSegments,
+                                        source: "A one.\n\nB changed.\n\nC three.", previous: previous)
+        XCTAssertEqual(changed.text, "あ")
+        // 前回の結果が無い
+        let none = TailSplice.splice(progressText: "あ", progressSegments: progressSegments,
+                                     source: oldSource, previous: nil)
+        XCTAssertEqual(none.text, "あ")
+        XCTAssertEqual(none.segments, progressSegments)
+    }
+}

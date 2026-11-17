@@ -103,3 +103,76 @@ enum LiveOutputPolicy {
         return !previous.utf16.starts(with: text.utf16)
     }
 }
+
+/// 編集した段落の訳を生成している間、その後ろの（変わっていない）段落に前回の訳を仮に並べる。
+///
+/// Kit の `translateDocument` は、生成中の段落より後ろの段落を、その段落が終わるまで返さない
+/// （キャッシュにある段落も、次にモデルを呼ぶ直前か最後にまとめて返る）。そのままだと、文章の途中を編集したとき
+/// 編集した段落の訳が流れている間だけ後ろの訳が消え、終わると戻る（ちらつく）。
+/// 前回の訳のうち、原文が同じ段落の訳を後ろにつなげて表示しておく。
+enum TailSplice {
+    /// - Parameters:
+    ///   - progressText: 途中経過の訳（Kit の `DocumentProgress.text`）
+    ///   - progressSegments: その段落対応（原文側は `source`、訳側は `progressText` の UTF-16 位置）
+    ///   - source: `translateDocument` に渡した原文
+    ///   - previous: 前回の翻訳結果（表示していた原文・訳とその段落対応）。無ければそのまま返す
+    /// - Returns: 表示する訳と段落対応（つなげた段落は `isComplete: true`）。つなげられる段落が無ければ入力のまま
+    static func splice(progressText: String, progressSegments: [SegmentAlignment], source: String,
+                       previous: OutputAlignment?) -> (text: String, segments: [SegmentAlignment]) {
+        guard let previous, !progressSegments.isEmpty else { return (progressText, progressSegments) }
+
+        // 前回の訳: 原文の段落 → その訳
+        let oldSource = previous.source as NSString, oldTarget = previous.target as NSString
+        var known: [String: String] = [:]
+        for s in previous.segments where s.isComplete {
+            guard s.sourceLocation >= 0, s.targetLocation >= 0,
+                  s.sourceLocation + s.sourceLength <= oldSource.length,
+                  s.targetLocation + s.targetLength <= oldTarget.length else { continue }
+            let paragraph = oldSource.substring(with: NSRange(location: s.sourceLocation, length: s.sourceLength))
+            if known[paragraph] == nil {
+                known[paragraph] = oldTarget.substring(with: NSRange(location: s.targetLocation, length: s.targetLength))
+            }
+        }
+        guard !known.isEmpty else { return (progressText, progressSegments) }
+
+        // 新しい原文の段落（Kit と同じ区切り方）と、その前にある区切り（空行・翻訳しない空白だけの段落）
+        var paragraphs: [(location: Int, text: String, separatorBefore: String)] = []
+        var offset = 0
+        var pendingSeparator = ""
+        for segment in TextSegmenter.segments(source) {
+            let piece: String
+            switch segment {
+            case .text(let s): piece = s
+            case .separator(let s): piece = s
+            }
+            if DocumentAssembler.isTranslatable(segment) {
+                paragraphs.append((offset, piece, pendingSeparator))
+                pendingSeparator = ""
+            } else {
+                pendingSeparator += piece
+            }
+            offset += piece.utf16.count
+        }
+
+        // 途中経過に入っていない段落から、前回の訳がある限り続けてつなげる
+        let next = progressSegments.count
+        guard next < paragraphs.count else { return (progressText, progressSegments) }
+        var text = progressText
+        var segments = progressSegments
+        var targetLength = (progressText as NSString).length
+        for j in next..<paragraphs.count {
+            guard let translation = known[paragraphs[j].text] else { break }
+            let separator = paragraphs[j].separatorBefore
+            text += separator
+            targetLength += separator.utf16.count
+            let length = translation.utf16.count
+            segments.append(SegmentAlignment(sourceLocation: paragraphs[j].location,
+                                             sourceLength: paragraphs[j].text.utf16.count,
+                                             targetLocation: targetLength, targetLength: length,
+                                             isComplete: true))
+            text += translation
+            targetLength += length
+        }
+        return (text, segments)
+    }
+}
