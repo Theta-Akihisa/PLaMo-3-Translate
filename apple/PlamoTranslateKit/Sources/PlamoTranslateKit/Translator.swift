@@ -195,52 +195,52 @@ public final class Translator: ObservableObject {
     /// 各要素は「現時点で組み立て済みの全訳文」（区切りは原文のまま保持）。
     /// 出力が上限で切れた段落は途中までの訳を残して次の段落へ進み、`truncatedParagraphs` で報告する
     /// （その段落は history に加えない）。
+    /// 各要素の `alignment` は、`text`（原文）とその要素の `text`（訳文）の段落対応（UTF-16 単位）。
+    /// 空白のみの段落は翻訳せずそのまま出力し、段落数・対応には含めない。
     public func translateDocument(text: String, settings: TranslationSettings) -> AsyncThrowingStream<DocumentProgress, Error> {
-        let segments = TextSegmenter.segments(text)
-        let total = segments.filter { $0.isText }.count
+        let assembler = DocumentAssembler(source: text)
+        let total = assembler.totalParagraphs
         return AsyncThrowingStream { continuation in
             let task = Task { @MainActor [weak self] in
                 guard let self else { continuation.finish(); return }
-                var assembled = ""
+                var doc = assembler
                 var done = 0
                 var truncatedCount = 0
                 var history: [HistoryPair] = []
-                func progress(_ text: String, finished: Bool = false) -> DocumentProgress {
-                    DocumentProgress(text: text, totalParagraphs: total, completedParagraphs: done,
-                                     isFinished: finished, truncatedParagraphs: truncatedCount)
+                func progress(_ snapshot: DocumentAssembler.Snapshot, finished: Bool = false) -> DocumentProgress {
+                    DocumentProgress(text: snapshot.text, totalParagraphs: total, completedParagraphs: done,
+                                     isFinished: finished, truncatedParagraphs: truncatedCount,
+                                     alignment: snapshot.alignment)
                 }
                 do {
-                    for seg in segments {
+                    while let src = doc.beginNextParagraph() {
                         try Task.checkCancellation()
-                        switch seg {
-                        case .separator(let s):
-                            assembled += s
-                        case .text(let src):
-                            let hist = settings.useHistory && settings.historyLimit > 0
-                                ? Array(history.suffix(settings.historyLimit)) : []
-                            let req = settings.makeRequest(text: src, history: hist)
-                            var part = ""
-                            var truncated = false
-                            do {
-                                for try await d in self.translate(req, maxTokens: settings.maxTokens) {
-                                    part += d
-                                    continuation.yield(progress(assembled + part))
-                                }
-                            } catch TranslatorError.outputTruncated {
-                                truncated = true
+                        let hist = settings.useHistory && settings.historyLimit > 0
+                            ? Array(history.suffix(settings.historyLimit)) : []
+                        let req = settings.makeRequest(text: src, history: hist)
+                        var part = ""
+                        var truncated = false
+                        do {
+                            for try await d in self.translate(req, maxTokens: settings.maxTokens) {
+                                part += d
+                                continuation.yield(progress(doc.snapshot(partial: part)))
                             }
-                            let cleaned = PFML3.cleanOutput(part)
-                            assembled += cleaned
-                            done += 1
-                            if truncated {
-                                truncatedCount += 1
-                            } else if !cleaned.isEmpty {
-                                history.append(HistoryPair(source: src, translation: cleaned))
-                            }
-                            continuation.yield(progress(assembled))
+                        } catch TranslatorError.outputTruncated {
+                            truncated = true
                         }
+                        // 対応の訳文側は整形後の文字列で数える（text に入るのはこの文字列）
+                        let cleaned = PFML3.cleanOutput(part)
+                        doc.complete(output: cleaned)
+                        done += 1
+                        if truncated {
+                            truncatedCount += 1
+                        } else if !cleaned.isEmpty {
+                            history.append(HistoryPair(source: src, translation: cleaned))
+                        }
+                        continuation.yield(progress(doc.snapshot()))
                     }
-                    continuation.yield(progress(assembled, finished: true))
+                    // beginNextParagraph が nil を返した時点で末尾の区切りまで text に入っている
+                    continuation.yield(progress(doc.snapshot(), finished: true))
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()

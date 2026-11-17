@@ -22,7 +22,8 @@ PFML3.cleanOutput(_:) -> String
 PFML3.stopStrings
 LanguageCatalog.all / .targets / .name(for:)
 ModelCatalog.all / .defaultModel / .spec(id:)
-TextSegmenter.segments(_:) -> [Segment]      // .text / .separator（区切りを保持）
+TextSegmenter.segments(_:) -> [Segment]      // .text / .separator（区切りを保持。\n / \r\n / \r の改行を認識）
+DocumentAssembler                            // 段落ごとの訳文の組み立て＋原文との対応（SegmentAlignment）
 TextSegmenter.paragraphs(_:)
 TranslationSettings                          // Codable。makeRequest(text:history:)
 
@@ -37,7 +38,7 @@ try await translator.load(model: spec, quant: nil, contextLength: 8192)
 translator.unload()
 for try await delta in translator.translate(request, maxTokens: 2048) { ... }  // 差分ストリーム
 try await translator.translateOnce(request)                                    // 全文
-for try await p in translator.translateDocument(text: t, settings: s) { p.text }  // 段落ごと＋履歴つき
+for try await p in translator.translateDocument(text: t, settings: s) { p.text; p.alignment }  // 段落ごと＋履歴つき
 Translator.recommendedModels() / Translator.memoryWarning(for:)
 
 // 低レベル（ローカル API など）
@@ -64,6 +65,32 @@ try await engine.tokenCount(of: text)        // BOS を含むトークン数
 - `Translator.translate` は全差分を流したあと `TranslatorError.outputTruncated` を投げて終わります。`translateOnce` も同様です。
 - `translateDocument` は打ち切られた段落の途中までの訳を残して次の段落へ進み、`DocumentProgress.truncatedParagraphs` で件数を報告します
   （その段落は history に加えません）。
+
+### 段落の対応（`DocumentProgress.alignment`）
+
+`translateDocument` が流す各 `DocumentProgress` は、原文の段落とその要素の `text`（訳文）の対応を
+`alignment: [SegmentAlignment]` に持ちます（スクロール連動などに使う）。
+
+```swift
+public struct SegmentAlignment: Sendable, Equatable, Hashable {
+    public var sourceLocation: Int   // translateDocument(text:) に渡した文字列での位置
+    public var sourceLength: Int
+    public var targetLocation: Int   // その DocumentProgress.text での位置
+    public var targetLength: Int
+    public var isComplete: Bool      // 翻訳中の段落は false（targetLength は途中結果の長さで、伸びていく）
+}
+```
+
+- 位置・長さはすべて **UTF-16 コード単位**（`NSString` / `NSRange` と同じ。`String.count` ではない）。
+  `NSRange(location: a.targetLocation, length: a.targetLength)` をそのまま `p.text` に使えます。
+- 翻訳対象の段落（空白以外を含む `.text`）ごとに 1 要素、文書順で、原文側・訳文側とも重なりません。
+  区切り・空白のみの段落は翻訳せずそのまま出力され、要素も段落数にも含まれません。
+- 開始済みの段落をすべて含みます（完了済み＋翻訳中の最大 1 つ）。翻訳中の要素は途中経過の値ごとに `text` と一致します。
+- 出力が空・打ち切りの段落にも要素があります（空なら `targetLength == 0`）。訳文に空行が含まれていても対応はずれません。
+- 訳文側は `PFML3.cleanOutput` で整形した後の文字列（＝ `text` に入る文字列）で数えます。
+- `DocumentProgress(...)` の `alignment` 引数は省略可能（既定値 `[]`）です。
+
+組み立てと対応の計算は Core の `DocumentAssembler` が行います（`DocumentAssembler.assemble(source:outputs:partial:)` で一括計算も可能。Linux でもテスト可）。
 
 ### history とコンテキスト長
 
