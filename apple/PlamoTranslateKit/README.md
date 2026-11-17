@@ -24,6 +24,7 @@ LanguageCatalog.all / .targets / .name(for:)
 ModelCatalog.all / .defaultModel / .spec(id:)
 TextSegmenter.segments(_:) -> [Segment]      // .text / .separator（区切りを保持。\n / \r\n / \r の改行を認識）
 DocumentAssembler                            // 段落ごとの訳文の組み立て＋原文との対応（SegmentAlignment）
+ParagraphTranslationCache                    // 段落単位の訳文キャッシュ（LRU。Translator が内部で使う）
 TextSegmenter.paragraphs(_:)
 TranslationSettings                          // Codable。makeRequest(text:history:)
 
@@ -38,7 +39,8 @@ try await translator.load(model: spec, quant: nil, contextLength: 8192)
 translator.unload()
 for try await delta in translator.translate(request, maxTokens: 2048) { ... }  // 差分ストリーム
 try await translator.translateOnce(request)                                    // 全文
-for try await p in translator.translateDocument(text: t, settings: s) { p.text; p.alignment }  // 段落ごと＋履歴つき
+for try await p in translator.translateDocument(text: t, settings: s) { p.text; p.alignment; p.reusedParagraphs }  // 段落ごと＋履歴＋キャッシュ
+translator.clearTranslationCache()           // 段落キャッシュを消去
 Translator.recommendedModels() / Translator.memoryWarning(for:)
 
 // 低レベル（ローカル API など）
@@ -91,6 +93,27 @@ public struct SegmentAlignment: Sendable, Equatable, Hashable {
 - `DocumentProgress(...)` の `alignment` 引数は省略可能（既定値 `[]`）です。
 
 組み立てと対応の計算は Core の `DocumentAssembler` が行います（`DocumentAssembler.assemble(source:outputs:partial:)` で一括計算も可能。Linux でもテスト可）。
+
+### 段落キャッシュ（`DocumentProgress.reusedParagraphs`）
+
+原文の途中を編集して再翻訳したとき、変わっていない段落をモデルに送らずに済むよう、`translateDocument` は
+段落単位の訳文を `Translator` 内のキャッシュ（Core の `ParagraphTranslationCache`）に保存して再利用します。
+
+- **キー**: 段落の原文（完全一致）＋ `settings.makeRequest` と同じ正規化をした翻訳先言語（`ja(easy)` → `ja-easy`）・
+  翻訳元言語（自動なら nil）・文体（翻訳先が `ja` のときのみ）・文脈・用語集（順序も区別）＋ **読み込み済み**モデルの ID と量子化。
+  `settings.modelID` / `quant` ではなく実際に読み込まれているモデルを使います。
+- **history はキーに含めません。** 前後の段落が変わっても、原文と設定が同じ段落は以前の訳文を再利用します（意図した動作）。
+  `maxTokens` / `contextLength` / `useHistory` / `historyLimit` もキーに含めません。
+- ヒットした段落はモデルを呼ばずに組み立て（対応 `alignment` もモデルで訳した段落と同じ形）、`reusedParagraphs` で件数を報告します
+  （`completedParagraphs` にも含む）。連続するヒット段落は、次にモデルを呼ぶ直前（または最後）の進捗値でまとめて流すので、
+  キャッシュ済みの先頭部分はすぐに表示されます。history には、ヒットした段落の訳文もこれまでどおり入ります。
+- 保存するのはモデルで訳し終えた段落の整形済み訳文のみです。打ち切り（`.length`）・空の出力・キャンセル・エラー、
+  生成中にモデルが入れ替わった段落は保存しません。単発の `translate` / `translateOnce` はキャッシュを使いません。
+- 上限は 4,000 件または原文＋訳文で約 4 MB（UTF-8）のどちらか先に達した方。超えたら最も長く使われていないものから捨てます（LRU）。
+- **消去**: `clearTranslationCache()`。別のモデル・量子化の読み込みが完了したときにも自動で空にします
+  （キーにモデル・量子化が入っているので正しさには影響せず、メモリを空けるためです）。`unload()` では消さないので、
+  同じモデルを読み直せば再利用できます。
+- キャッシュは `Translator` の MainActor 上にあり、ほかのスレッドからは触りません。
 
 ### history とコンテキスト長
 

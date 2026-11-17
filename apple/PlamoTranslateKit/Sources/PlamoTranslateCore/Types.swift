@@ -145,14 +145,17 @@ public struct DocumentProgress: Sendable, Equatable {
     /// 原文側・訳文側とも文書順で重ならない。出力が空・打ち切りの段落にも要素がある（空なら `targetLength == 0`）。
     /// 翻訳中の段落は `isComplete == false` で、`targetLength` は `text` に含まれる途中結果の長さ。
     public var alignment: [SegmentAlignment]
+    /// この実行で段落キャッシュから再利用した（モデルを呼ばなかった）段落の数。`completedParagraphs` に含まれる
+    public var reusedParagraphs: Int
     public init(text: String, totalParagraphs: Int, completedParagraphs: Int, isFinished: Bool,
-                truncatedParagraphs: Int = 0, alignment: [SegmentAlignment] = []) {
+                truncatedParagraphs: Int = 0, alignment: [SegmentAlignment] = [], reusedParagraphs: Int = 0) {
         self.text = text
         self.totalParagraphs = totalParagraphs
         self.completedParagraphs = completedParagraphs
         self.isFinished = isFinished
         self.truncatedParagraphs = truncatedParagraphs
         self.alignment = alignment
+        self.reusedParagraphs = reusedParagraphs
     }
     public var fraction: Double {
         totalParagraphs == 0 ? 1 : Double(completedParagraphs) / Double(totalParagraphs)
