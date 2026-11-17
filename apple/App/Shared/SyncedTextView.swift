@@ -1,4 +1,5 @@
 import SwiftUI
+import PlamoTranslateCore
 #if canImport(UIKit)
 import UIKit
 typealias PlatformTextView = UITextView
@@ -14,11 +15,17 @@ typealias PlatformColor = NSColor
 /// 原文と訳文のスクロールを連動させる。
 ///
 /// 片方をスクロールすると、もう片方を「同じ段落の同じ位置」へスクロールする。
-/// 段落（空行区切り）の数が両方で同じなら段落単位で対応づけ（長い文書は段落ごとに翻訳するので通常一致する）、
-/// 行数が同じなら行単位、どちらも違えば全体に対する割合で合わせる。
+/// 1. 長文（段落ごとに翻訳）は Kit の段落対応（`OutputAlignment`）で、原文の段落と訳文の段落の Y を組にして対応づける。
+///    翻訳途中は訳し終えた段落だけを対応づけ、その先では相手を「翻訳済みの部分の終わり」に留める。
+/// 2. 段落対応が無い（短文・原文を編集した後など）ときは、空行で区切った段落の数が同じなら段落、
+///    行数が同じなら行で対応づけ、どちらも違えば全体に対する割合で合わせる。
+/// 3. 翻訳済みなら、基準側の最後の 1 画面分で相手を末尾へ少しずつ寄せる（両方同時に最後に着く）。
 @MainActor
 final class ScrollSyncController: ObservableObject {
-    enum Side: Hashable { case source, target }
+    enum Side: Hashable {
+        case source, target
+        var other: Side { self == .source ? .target : .source }
+    }
 
     /// 連動のオン／オフ（設定 `scrollSync.v1`）
     var isEnabled: Bool {
@@ -32,17 +39,39 @@ final class ScrollSyncController: ObservableObject {
     private weak var target: PlatformTextView?
     /// こちらでスクロール位置を変えている最中（その通知をユーザー操作とみなさない）
     private(set) var isSyncing = false
-    /// 最後にユーザーがスクロールした側（訳文が伸びたときにどちらに合わせるか）。
-    /// プログラムからのスクロールや文字列の変化では変えない。
-    private var leader: Side = .source
+    /// 連動の基準にする側。ユーザーがスクロールした側。
+    /// 原文を編集したとき・訳文が空になったとき・翻訳を始めたときは原文に戻す。
+    private(set) var leader: Side = .source
+    /// 翻訳中。文字列の変化による合わせ直しは常に原文を基準にする（訳文側のユーザー操作では原文も動かす）
+    private var isTranslating = false
+    /// Kit の段落対応（長文の翻訳結果）。表示中の文字列と一致する間だけ使う
+    private var alignment: OutputAlignment?
 
     /// 文字列が変わるたびに増やす番号（キャッシュの無効化用）
     private var revisions: [Side: Int] = [:]
-    /// 段落・行の開始位置と、その Y 座標のキャッシュ（文字列・幅・文字サイズが変わったら作り直す）
+    /// 段落・行の開始位置のキャッシュ（文字列・幅・文字サイズが変わったら作り直す）
     private var caches: [Side: TextGeometryCache] = [:]
+    /// 対応づける Y の組のキャッシュ（スクロールのたびに計算しない）
+    private var unitsCache: UnitsCache?
+    /// こちらで最後に設定したスクロール位置（その位置への変化の通知をユーザー操作とみなさない）
+    private var programmaticOffsets: [Side: CGFloat] = [:]
 
     private var lastContentSync = Date.distantPast
     private var contentSyncScheduled = false
+
+    /// 原文・訳文で対応する Y（どちらも単調増加で同じ要素数）
+    private struct PairedUnits {
+        var source: [CGFloat]
+        var target: [CGFloat]
+        /// 翻訳途中（末尾の合わせ込みをしない・未翻訳部分では相手を留める）
+        var isPartial: Bool
+    }
+
+    private struct UnitsCache {
+        var source: TextGeometryCache.Key
+        var target: TextGeometryCache.Key
+        var units: PairedUnits?
+    }
 
     func register(_ view: PlatformTextView, as side: Side) {
         switch side {
@@ -60,64 +89,138 @@ final class ScrollSyncController: ObservableObject {
     func didScroll(_ side: Side) {
         guard !isSyncing, isEnabled else { return }
         leader = side
+        programmaticOffsets[side] = nil
         sync(from: side)
+    }
+
+    /// ユーザーが文字列を編集した（原文の入力）。原文を編集したら原文を基準にする
+    /// （訳文をスクロールした後に原文を直しても、訳文のリセットで原文が先頭へ飛ばないように）
+    func userDidEdit(_ side: Side) {
+        textDidChange(side)
+        if side == .source { leader = .source }
     }
 
     /// 文字列が変わった（入力・置き換え）。その側のキャッシュを捨てる
     func textDidChange(_ side: Side) {
         revisions[side, default: 0] += 1
         caches[side] = nil
+        unitsCache = nil
     }
 
     /// 文字列やレイアウトが変わった（訳文のストリーミング・文字サイズ変更など）。
-    /// 直前にユーザーがスクロールした側に合わせ直す。ストリーミング中は最大 10 回/秒にまとめる。
+    /// 基準の側に合わせ直す（翻訳中は原文）。ストリーミング中は最大 10 回/秒にまとめる。
     func contentDidChange(_ side: Side) {
         textDidChange(side)
+        // 訳文が空になった（新しい翻訳・クリア）: 原文を基準に戻す
+        if side == .target, let v = target, TextViewGeometry.textLength(of: v) == 0 { leader = .source }
+        scheduleContentSync()
+    }
+
+    /// Kit の段落対応（長文の翻訳）。短文・訳文のリセット・原文の編集では nil
+    func setAlignment(_ newValue: OutputAlignment?) {
+        guard newValue != alignment else { return }
+        alignment = newValue
+        unitsCache = nil
+        scheduleContentSync()
+    }
+
+    /// 翻訳の開始・終了
+    func setTranslating(_ translating: Bool) {
+        guard translating != isTranslating else { return }
+        isTranslating = translating
+        if translating { leader = .source }
+        unitsCache = nil
+        scheduleContentSync()   // 終わったら末尾の合わせ込みを有効にして合わせ直す
+    }
+
+    /// こちらで設定したスクロール位置か（遅れて届いた通知をユーザー操作とみなさない）
+    func isProgrammaticOffset(_ y: CGFloat, on side: Side) -> Bool {
+        guard let p = programmaticOffsets[side] else { return false }
+        return abs(p - y) < 0.5
+    }
+
+    private func scheduleContentSync() {
         guard isEnabled, !contentSyncScheduled else { return }
         contentSyncScheduled = true
         let wait = max(0, Self.contentSyncInterval - Date().timeIntervalSince(lastContentSync))
-        // 次の周回以降（レイアウトが済んでから）に行う
+        // 次の周回以降（レイアウト・もう片方のペインの更新が済んでから）に行う
         Task { @MainActor [weak self] in
             if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
             guard let self else { return }
             self.contentSyncScheduled = false
             self.lastContentSync = Date()
             guard !self.isSyncing, self.isEnabled else { return }
-            self.sync(from: self.leader)
+            self.sync(from: self.isTranslating ? .source : self.leader)
         }
     }
 
     private func sync(from side: Side) {
-        let otherSide: Side = side == .source ? .target : .source
+        let otherSide = side.other
         guard let from = view(side), let to = view(otherSide) else { return }
         isSyncing = true
         defer { isSyncing = false }
         // レイアウトが途中だと本文の高さ・スクロールできる範囲が実際より短く、相手が途中で止まる・ずれる。
-        // 全体をレイアウトしてから測る（済んでいれば軽い）。
+        // 未レイアウトの部分だけレイアウトしてから測る（済んでいれば何もしない）。
         TextViewGeometry.ensureLayout(of: from)
         TextViewGeometry.ensureLayout(of: to)
-        let aOffset = TextViewGeometry.scrollOffset(of: from)
         let aMax = TextViewGeometry.maxScrollOffset(of: from)
         let bMax = TextViewGeometry.maxScrollOffset(of: to)
-        // 先頭・末尾・スクロールできない場合は単位の対応づけ（レイアウト計算）を省く
-        let needsUnits = aMax > 0 && bMax > 0 && aOffset > 0.5 && aOffset < aMax - 1
-        let units = needsUnits ? unitOffsets(from: side, from, to: otherSide, to) : nil
-        guard let y = ScrollMapping.mappedOffset(aOffset: aOffset, aMax: aMax, bMax: bMax, units: units) else { return }
+        guard aMax > 0, bMax > 0 else { return }
+        var units: (a: [CGFloat], b: [CGFloat])?
+        var isPartial = false
+        if let u = pairedUnits() {
+            units = side == .source ? (u.source, u.target) : (u.target, u.source)
+            isPartial = u.isPartial
+        }
+        guard let y = ScrollMapping.mappedOffset(aOffset: TextViewGeometry.scrollOffset(of: from), aMax: aMax, bMax: bMax,
+                                                aViewport: TextViewGeometry.viewportHeight(of: from),
+                                                units: units, endBlending: !isPartial && !isTranslating)
+        else { return }
         guard abs(y - TextViewGeometry.scrollOffset(of: to)) >= 0.5 else { return }
-        TextViewGeometry.setScrollOffset(y, of: to)
+        programmaticOffsets[otherSide] = TextViewGeometry.setScrollOffset(y, of: to)
     }
 
-    /// 段落数が同じなら段落、行数が同じなら行の先頭 Y（末尾に本文の高さを足したもの）の組。どちらも違えば nil
-    private func unitOffsets(from aSide: Side, _ a: PlatformTextView,
-                             to bSide: Side, _ b: PlatformTextView) -> (a: [CGFloat], b: [CGFloat])? {
-        let ga = geometry(aSide, a), gb = geometry(bSide, b)
-        if ga.paragraphStarts.count > 1, ga.paragraphStarts.count == gb.paragraphStarts.count {
-            return (yOffsets(aSide, a, kind: .paragraph), yOffsets(bSide, b, kind: .paragraph))
+    /// 対応づける Y の組（段落対応 → 段落 → 行の順に試す）。文字列・幅・文字サイズが同じ間は使い回す
+    private func pairedUnits() -> PairedUnits? {
+        guard let s = source, let t = target else { return nil }
+        let sk = key(.source, s), tk = key(.target, t)
+        if let c = unitsCache, c.source == sk, c.target == tk { return c.units }
+        let units = alignedUnits(s, t) ?? heuristicUnits(s, t)
+        unitsCache = UnitsCache(source: sk, target: tk, units: units)
+        return units
+    }
+
+    /// Kit の段落対応から（表示中の文字列が対応の元の文字列と同じときだけ）
+    private func alignedUnits(_ s: PlatformTextView, _ t: PlatformTextView) -> PairedUnits? {
+        guard let a = alignment,
+              TextViewGeometry.textLength(of: s) == a.sourceLength,
+              TextViewGeometry.textLength(of: t) == a.targetLength,
+              TextViewGeometry.textEquals(a.source, in: s),
+              TextViewGeometry.textEquals(a.target, in: t),
+              let plan = AlignmentUnits.plan(a.segments, source: a.source, targetLength: a.targetLength)
+        else { return nil }
+        let ys = ScrollMapping.monotone(a: plan.boundaries.map { TextViewGeometry.y(of: $0.source, in: s) },
+                                        b: plan.boundaries.map { TextViewGeometry.y(of: $0.target, in: t) })
+        return PairedUnits(source: ys.a, target: ys.b, isPartial: plan.isPartial)
+    }
+
+    /// 段落数が同じなら段落、行数が同じなら行の先頭 Y の組（先頭に 0、末尾に本文の高さ）。どちらも違えば nil
+    private func heuristicUnits(_ s: PlatformTextView, _ t: PlatformTextView) -> PairedUnits? {
+        var gs = geometry(.source, s), gt = geometry(.target, t)
+        let ss: [Int], ts: [Int]
+        if gs.paragraphStarts.count > 1, gs.paragraphStarts.count == gt.paragraphStarts.count {
+            ss = gs.paragraphStarts; ts = gt.paragraphStarts
+        } else {
+            let sl = gs.lines(), tl = gt.lines()
+            caches[.source] = gs
+            caches[.target] = gt
+            guard sl.count > 1, sl.count == tl.count else { return nil }
+            ss = sl; ts = tl
         }
-        if ga.lineStarts.count > 1, ga.lineStarts.count == gb.lineStarts.count {
-            return (yOffsets(aSide, a, kind: .line), yOffsets(bSide, b, kind: .line))
-        }
-        return nil
+        let ys = ScrollMapping.monotone(
+            a: [CGFloat(0)] + ss.map { TextViewGeometry.y(of: .top($0), in: s) } + [TextViewGeometry.contentHeight(of: s)],
+            b: [CGFloat(0)] + ts.map { TextViewGeometry.y(of: .top($0), in: t) } + [TextViewGeometry.contentHeight(of: t)])
+        return PairedUnits(source: ys.a, target: ys.b, isPartial: false)
     }
 
     private func key(_ side: Side, _ v: PlatformTextView) -> TextGeometryCache.Key {
@@ -130,27 +233,14 @@ final class ScrollSyncController: ObservableObject {
     private func geometry(_ side: Side, _ v: PlatformTextView) -> TextGeometryCache {
         let k = key(side, v)
         if let c = caches[side], c.key == k { return c }
-        let text = TextViewGeometry.string(of: v)
-        let c = TextGeometryCache(key: k, paragraphStarts: TextUnits.paragraphStarts(text),
-                                  lineStarts: TextUnits.lineStarts(text))
+        let c = TextGeometryCache(key: k, text: TextViewGeometry.string(of: v))
         caches[side] = c
         return c
     }
-
-    private func yOffsets(_ side: Side, _ v: PlatformTextView, kind: TextGeometryCache.Kind) -> [CGFloat] {
-        let c = geometry(side, v)
-        if let ys = c.yOffsets[kind] { return ys }
-        let starts = kind == .paragraph ? c.paragraphStarts : c.lineStarts
-        let ys = starts.map { TextViewGeometry.yOffset(ofCharacterAt: $0, in: v) } + [TextViewGeometry.contentHeight(of: v)]
-        caches[side]?.yOffsets[kind] = ys
-        return ys
-    }
 }
 
-/// 1 つのテキストビューの段落・行の位置（文字列・幅・文字サイズが同じ間は使い回す）
+/// 1 つのテキストビューの段落・行の開始位置（文字列・幅・文字サイズが同じ間は使い回す）
 struct TextGeometryCache {
-    enum Kind: Hashable { case paragraph, line }
-
     struct Key: Equatable {
         var revision: Int
         var length: Int
@@ -159,81 +249,22 @@ struct TextGeometryCache {
     }
 
     var key: Key
-    var paragraphStarts: [Int]
-    var lineStarts: [Int]
-    /// 各単位の先頭の Y 座標 + 末尾に本文の高さ（必要になったときに計算する）
-    var yOffsets: [Kind: [CGFloat]] = [:]
-}
+    let text: String
+    let paragraphStarts: [Int]
+    /// 空でない行の開始位置（段落数が合わないときだけ求める）
+    private var lineStarts: [Int]?
 
-/// 2 つのテキストビュー間でスクロール位置を対応づける（純粋な計算）
-enum ScrollMapping {
-    /// - Parameters:
-    ///   - aOffset: 動かした側の表示上端
-    ///   - aMax / bMax: それぞれのスクロールできる最大値
-    ///   - units: 対応づける単位（段落・行）の先頭 Y。末尾に本文の高さを足したもので、要素数が同じ。nil なら全体の割合で合わせる
-    /// - Returns: もう片方のスクロール位置。nil なら動かさない（動かした側がスクロールできない）
-    static func mappedOffset(aOffset: CGFloat, aMax: CGFloat, bMax: CGFloat,
-                             units: (a: [CGFloat], b: [CGFloat])?) -> CGFloat? {
-        // 動かした側がスクロールできない（短い）なら、もう片方はそのままにする
-        guard aMax > 0 else { return nil }
-        guard bMax > 0 else { return nil }
-        // 端は端に合わせる（最後まで読んだら両方とも最後）
-        if aOffset <= 0.5 { return 0 }
-        if aOffset >= aMax - 1 { return bMax }
-
-        if let units, units.a.count > 2, units.a.count == units.b.count {
-            let aYs = units.a, bYs = units.b
-            let count = aYs.count - 1   // 単位の数
-            // a の表示上端を含む単位（aYs[i] <= aOffset となる最後の i）を二分探索
-            var lo = 0, hi = count - 1, unit = 0
-            while lo <= hi {
-                let mid = (lo + hi) / 2
-                if aYs[mid] <= aOffset { unit = mid; lo = mid + 1 } else { hi = mid - 1 }
-            }
-            let span = max(aYs[unit + 1] - aYs[unit], 1)
-            let fraction = min(max((aOffset - aYs[unit]) / span, 0), 1)
-            let y = bYs[unit] + fraction * (bYs[unit + 1] - bYs[unit])
-            return min(max(y, 0), bMax)
-        }
-        // 対応づけられない場合は全体に対する割合
-        return (aOffset / aMax) * bMax
-    }
-}
-
-/// 段落・行の開始位置（UTF-16 オフセット）
-enum TextUnits {
-    private static let paragraphBreak = try! NSRegularExpression(pattern: "\\n[ \\t\\u3000]*\\n\\s*")
-
-    /// 空行で区切られた段落の開始位置
-    static func paragraphStarts(_ s: String) -> [Int] {
-        let ns = s as NSString
-        guard ns.length > 0 else { return [] }
-        var starts = [firstNonWhitespace(ns, from: 0)]
-        for m in paragraphBreak.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
-            let end = m.range.location + m.range.length
-            if end < ns.length { starts.append(end) }
-        }
-        return starts
+    init(key: Key, text: String) {
+        self.key = key
+        self.text = text
+        self.paragraphStarts = TextUnits.paragraphStarts(text)
     }
 
-    /// 空でない行の開始位置
-    static func lineStarts(_ s: String) -> [Int] {
-        let ns = s as NSString
-        var starts: [Int] = []
-        var location = 0
-        while location < ns.length {
-            let line = ns.lineRange(for: NSRange(location: location, length: 0))
-            let text = ns.substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty { starts.append(line.location) }
-            location = line.location + max(line.length, 1)
-        }
-        return starts
-    }
-
-    private static func firstNonWhitespace(_ ns: NSString, from i: Int) -> Int {
-        let r = ns.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted,
-                                    range: NSRange(location: i, length: ns.length - i))
-        return r.location == NSNotFound ? 0 : r.location
+    mutating func lines() -> [Int] {
+        if let lineStarts { return lineStarts }
+        let l = TextUnits.lineStarts(text)
+        lineStarts = l
+        return l
     }
 }
 
@@ -243,25 +274,44 @@ enum TextViewGeometry {
     #if canImport(UIKit)
     static func string(of v: UITextView) -> String { v.text ?? "" }
     static func textLength(of v: UITextView) -> Int { v.textStorage.length }
+    /// 表示中の文字列が `s` と同じか（UTF-16 単位で比べる）
+    static func textEquals(_ s: String, in v: UITextView) -> Bool { v.textStorage.mutableString.isEqual(to: s) }
     static func layoutWidth(of v: UITextView) -> CGFloat { v.textContainer.size.width }
     static func fontSize(of v: UITextView) -> CGFloat { v.font?.pointSize ?? 0 }
     static func scrollOffset(of v: UITextView) -> CGFloat { v.contentOffset.y + v.adjustedContentInset.top }
     static func maxScrollOffset(of v: UITextView) -> CGFloat {
         max(0, v.contentSize.height + v.adjustedContentInset.top + v.adjustedContentInset.bottom - v.bounds.height)
     }
-    static func setScrollOffset(_ y: CGFloat, of v: UITextView) {
-        v.setContentOffset(CGPoint(x: v.contentOffset.x, y: y - v.adjustedContentInset.top), animated: false)
+    static func viewportHeight(of v: UITextView) -> CGFloat {
+        max(0, v.bounds.height - v.adjustedContentInset.top - v.adjustedContentInset.bottom)
+    }
+    /// - Returns: 実際に設定した位置
+    @discardableResult
+    static func setScrollOffset(_ y: CGFloat, of v: UITextView) -> CGFloat {
+        let clamped = min(max(y, 0), maxScrollOffset(of: v))
+        v.setContentOffset(CGPoint(x: v.contentOffset.x, y: clamped - v.adjustedContentInset.top), animated: false)
+        return clamped
     }
     static func contentHeight(of v: UITextView) -> CGFloat { v.contentSize.height }
     static func ensureLayout(of v: UITextView) {
+        // 済んでいれば何もしない（スクロールのたびに呼ぶので）。末尾だけ書き換えた場合はそこから先だけレイアウトされる
+        guard v.layoutManager.firstUnlaidCharacterIndex() < v.textStorage.length else { return }
         v.layoutManager.ensureLayout(for: v.textContainer)
     }
-    static func yOffset(ofCharacterAt index: Int, in v: UITextView) -> CGFloat {
-        lineTop(ofCharacterAt: index, layoutManager: v.layoutManager, textLength: v.textStorage.length) + v.textContainerInset.top
+    static func y(of edge: AlignmentUnits.Edge, in v: UITextView) -> CGFloat {
+        let lm = v.layoutManager, n = v.textStorage.length, top = v.textContainerInset.top
+        switch edge {
+        case .origin: return 0
+        case .top(let i): return lineTop(ofCharacterAt: i, layoutManager: lm, textLength: n) + top
+        case .bottom(let i): return lineBottom(endingAt: i, layoutManager: lm, textLength: n) + top
+        case .end: return contentHeight(of: v)
+        }
     }
     #else
     static func string(of v: NSTextView) -> String { v.string }
     static func textLength(of v: NSTextView) -> Int { v.textStorage?.length ?? 0 }
+    /// 表示中の文字列が `s` と同じか（UTF-16 単位で比べる）
+    static func textEquals(_ s: String, in v: NSTextView) -> Bool { v.textStorage?.mutableString.isEqual(to: s) ?? false }
     static func layoutWidth(of v: NSTextView) -> CGFloat { v.textContainer?.size.width ?? 0 }
     static func fontSize(of v: NSTextView) -> CGFloat { v.font?.pointSize ?? 0 }
     static func scrollOffset(of v: NSTextView) -> CGFloat { v.enclosingScrollView?.contentView.bounds.origin.y ?? 0 }
@@ -269,14 +319,25 @@ enum TextViewGeometry {
         guard let sv = v.enclosingScrollView else { return 0 }
         return max(0, contentHeight(of: v) - sv.contentView.bounds.height)
     }
+    static func viewportHeight(of v: NSTextView) -> CGFloat { v.enclosingScrollView?.contentView.bounds.height ?? 0 }
     static func ensureLayout(of v: NSTextView) {
-        guard let lm = v.layoutManager, let tc = v.textContainer else { return }
+        guard let lm = v.layoutManager, let tc = v.textContainer, let storage = v.textStorage else { return }
+        // 済んでいれば何もしない（スクロールのたびに呼ぶので）。末尾だけ書き換えた場合はそこから先だけレイアウトされる
+        guard lm.firstUnlaidCharacterIndex() < storage.length else { return }
         lm.ensureLayout(for: tc)
     }
-    static func setScrollOffset(_ y: CGFloat, of v: NSTextView) {
-        guard let sv = v.enclosingScrollView else { return }
-        sv.contentView.scroll(to: NSPoint(x: sv.contentView.bounds.origin.x, y: y))
-        sv.reflectScrolledClipView(sv.contentView)
+    /// クリップビューが許す範囲に収めてからスクロールする。
+    /// - Returns: 実際に設定した位置
+    @discardableResult
+    static func setScrollOffset(_ y: CGFloat, of v: NSTextView) -> CGFloat {
+        guard let sv = v.enclosingScrollView else { return y }
+        let clip = sv.contentView
+        var rect = clip.bounds
+        rect.origin.y = y
+        let origin = clip.constrainBoundsRect(rect).origin
+        clip.scroll(to: origin)
+        sv.reflectScrolledClipView(clip)
+        return origin.y
     }
     /// 本文の高さ。テキストビューの枠がまだレイアウトに追いついていない場合はレイアウト結果から求める
     static func contentHeight(of v: NSTextView) -> CGFloat {
@@ -284,16 +345,50 @@ enum TextViewGeometry {
         let used = lm.usedRect(for: tc).maxY + v.textContainerOrigin.y + v.textContainerInset.height
         return max(v.frame.height, used)
     }
-    static func yOffset(ofCharacterAt index: Int, in v: NSTextView) -> CGFloat {
+    static func y(of edge: AlignmentUnits.Edge, in v: NSTextView) -> CGFloat {
         guard let lm = v.layoutManager, let storage = v.textStorage else { return 0 }
-        return lineTop(ofCharacterAt: index, layoutManager: lm, textLength: storage.length) + v.textContainerOrigin.y
+        let n = storage.length, top = v.textContainerOrigin.y
+        switch edge {
+        case .origin: return 0
+        case .top(let i): return lineTop(ofCharacterAt: i, layoutManager: lm, textLength: n) + top
+        case .bottom(let i): return lineBottom(endingAt: i, layoutManager: lm, textLength: n) + top
+        case .end: return contentHeight(of: v)
+        }
     }
     #endif
 
+    /// 文字を含む行の上端（文字列の末尾以降なら本文の下端）
     private static func lineTop(ofCharacterAt index: Int, layoutManager lm: NSLayoutManager, textLength: Int) -> CGFloat {
         guard textLength > 0 else { return 0 }
-        let glyph = lm.glyphIndexForCharacter(at: min(max(index, 0), textLength - 1))
+        guard index < textLength else { return textBottom(layoutManager: lm, textLength: textLength) }
+        let glyph = lm.glyphIndexForCharacter(at: max(index, 0))
         return lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minY
+    }
+
+    /// `end` で終わる範囲の最後の文字を含む行の下端
+    private static func lineBottom(endingAt end: Int, layoutManager lm: NSLayoutManager, textLength: Int) -> CGFloat {
+        guard textLength > 0, end > 0 else { return 0 }
+        let glyph = lm.glyphIndexForCharacter(at: min(end, textLength) - 1)
+        return lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).maxY
+    }
+
+    /// 本文の下端（末尾が改行なら、その後の空の行の上端）
+    private static func textBottom(layoutManager lm: NSLayoutManager, textLength: Int) -> CGFloat {
+        let extra = lm.extraLineFragmentRect
+        if extra.height > 0 { return extra.minY }
+        let glyph = lm.glyphIndexForCharacter(at: textLength - 1)
+        return lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).maxY
+    }
+}
+
+/// テキストビューに書き込む文字の属性（全体の置き換え時に `font` / `textColor` で付くものと同じ）
+enum SyncedTextAttributes {
+    static func attributes(fontSize: CGFloat) -> [NSAttributedString.Key: Any] {
+        #if canImport(UIKit)
+        return [.font: UIFont.systemFont(ofSize: fontSize), .foregroundColor: UIColor.label]
+        #else
+        return [.font: NSFont.systemFont(ofSize: fontSize), .foregroundColor: NSColor.labelColor]
+        #endif
     }
 }
 
@@ -334,7 +429,19 @@ struct SyncedTextView: UIViewRepresentable {
         var changed = false
         // 日本語入力の変換中（未確定文字あり）は書き換えない（変換が壊れる）
         if v.text != text, v.markedTextRange == nil {
-            v.text = text
+            let storage = v.textStorage
+            if let edit = TextTailEdit.make(from: storage.string, to: text) {
+                // 共通の先頭部分はそのまま、違う末尾だけ置き換える（ストリーミング中の訳文）。
+                // 上のレイアウト・スクロール位置・選択範囲が保たれ、レイアウトし直すのは末尾だけ
+                let selection = v.selectedRange
+                let attributes = SyncedTextAttributes.attributes(fontSize: fontSize)
+                storage.beginEditing()
+                storage.replaceCharacters(in: edit.range, with: NSAttributedString(string: edit.replacement, attributes: attributes))
+                storage.endEditing()
+                if v.selectedRange != selection, NSMaxRange(selection) <= storage.length { v.selectedRange = selection }
+            } else {
+                v.text = text
+            }
             // プログラムからの置き換え後に古い取り消し履歴を適用すると範囲がずれるので消す
             v.undoManager?.removeAllActions()
             changed = true
@@ -349,7 +456,7 @@ struct SyncedTextView: UIViewRepresentable {
         init(_ parent: SyncedTextView) { self.parent = parent }
 
         func textViewDidChange(_ textView: UITextView) {
-            MainActor.assumeIsolated { parent.controller.textDidChange(parent.side) }
+            MainActor.assumeIsolated { parent.controller.userDidEdit(parent.side) }
             // 変換中の未確定文字はモデルに渡さない（確定したときにもう一度呼ばれる）
             guard textView.markedTextRange == nil else { return }
             parent.text = textView.text
@@ -422,14 +529,27 @@ struct SyncedTextView: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
-        guard let v = scroll.documentView as? NSTextView else { return }
+        guard let v = scroll.documentView as? NSTextView, let storage = v.textStorage else { return }
         var changed = false
         // 日本語入力の変換中（未確定文字あり）は書き換えない（変換が壊れる）
         if v.string != text, !v.hasMarkedText() {
             let selection = v.selectedRanges
+            let edit = TextTailEdit.make(from: storage.string, to: text)
+            let attributes = SyncedTextAttributes.attributes(fontSize: fontSize)
+            let newText = text
+            let restoreSelection = edit != nil || isEditable
             coordinator.performProgrammaticChange {
-                v.string = text
-                if isEditable, let r = selection.first?.rangeValue, r.location + r.length <= (text as NSString).length {
+                if let edit {
+                    // 共通の先頭部分はそのまま、違う末尾だけ置き換える（ストリーミング中の訳文）。
+                    // 上のレイアウト・スクロール位置・選択範囲が保たれ、レイアウトし直すのは末尾だけ
+                    storage.beginEditing()
+                    storage.replaceCharacters(in: edit.range, with: NSAttributedString(string: edit.replacement, attributes: attributes))
+                    storage.endEditing()
+                } else {
+                    v.string = newText
+                }
+                if restoreSelection, selection != v.selectedRanges,
+                   selection.allSatisfy({ NSMaxRange($0.rangeValue) <= storage.length }) {
                     v.selectedRanges = selection
                 }
             }
@@ -449,19 +569,21 @@ struct SyncedTextView: NSViewRepresentable {
         var parent: SyncedTextView
         /// このテキストビュー専用の取り消し履歴（ウィンドウ共有のものを消さずに済むように）
         let undoManager = UndoManager()
-        private var observer: NSObjectProtocol?
-        private var liveScrollObserver: NSObjectProtocol?
+        private var observers: [NSObjectProtocol] = []
         /// プログラムからの変更中（その間のスクロール位置の変化はユーザー操作ではない）
         private var programmaticDepth = 0
+        /// スクロールバーのつまみのドラッグ・トラックパッドなどのライブスクロール中
+        private var isLiveScrolling = false
         private var lastOrigin: CGFloat = 0
         private var lastClipSize: CGSize = .zero
         private var lastDocumentHeight: CGFloat = 0
+        /// この時間より前のイベントは「いまの操作」とみなさない（非同期の処理中も直前のイベントが残っているため）
+        static let userEventWindow: TimeInterval = 0.5
 
         init(_ parent: SyncedTextView) { self.parent = parent }
 
         deinit {
-            if let observer { NotificationCenter.default.removeObserver(observer) }
-            if let liveScrollObserver { NotificationCenter.default.removeObserver(liveScrollObserver) }
+            for observer in observers { NotificationCenter.default.removeObserver(observer) }
         }
 
         func performProgrammaticChange(_ change: () -> Void) {
@@ -476,20 +598,25 @@ struct SyncedTextView: NSViewRepresentable {
             record(clip)
             // ホイール・トラックパッド（慣性を含む）でのスクロール。イベントごとに確実に連動させる
             scroll.onUserScroll = { [weak self] in self?.userDidScroll() }
-            observer = NotificationCenter.default.addObserver(
-                forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
-            ) { [weak self] note in
+            let center = NotificationCenter.default
+            // queue: nil — 投稿したその場（メインスレッド）で同期的に受ける。
+            // .main だと後回しになり、連動中かどうか・どのイベントの最中かを正しく判定できない
+            observers.append(center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil) { [weak self] note in
                 MainActor.assumeIsolated {
                     guard let self, let clip = note.object as? NSClipView else { return }
                     self.clipBoundsDidChange(clip)
                 }
-            }
+            })
+            observers.append(center.addObserver(forName: NSScrollView.willStartLiveScrollNotification, object: scroll, queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated { self?.isLiveScrolling = true }
+            })
+            observers.append(center.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: scroll, queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated { self?.isLiveScrolling = false }
+            })
             // スクロールバーのつまみのドラッグなど、ユーザー操作によるライブスクロール
-            liveScrollObserver = NotificationCenter.default.addObserver(
-                forName: NSScrollView.didLiveScrollNotification, object: scroll, queue: .main
-            ) { [weak self] _ in
+            observers.append(center.addObserver(forName: NSScrollView.didLiveScrollNotification, object: scroll, queue: nil) { [weak self] _ in
                 MainActor.assumeIsolated { self?.userDidScroll() }
-            }
+            })
         }
 
         /// ユーザー操作で確実にスクロールされた（ホイール・トラックパッド・スクロールバー）
@@ -506,8 +633,10 @@ struct SyncedTextView: NSViewRepresentable {
             lastDocumentHeight = clip.documentView?.frame.height ?? 0
         }
 
-        /// 表示位置が変わった（キーボードでのスクロール・カーソル移動に伴う自動スクロールなど）。
+        /// 表示位置が変わった（キーボードでのスクロール・カーソル移動やドラッグでの選択に伴う自動スクロールなど）。
         /// ホイール・トラックパッド・スクロールバーは onUserScroll / didLiveScroll で受けるので、ここは補助。
+        /// 後から起きる自動の補正（枠の大きさの変化・スクロールバーの出現・文字列の変化に伴う位置の補正）を
+        /// ユーザー操作と見誤らないよう、ユーザーの入力の最中に起きたものだけを連動させる。
         @MainActor
         private func clipBoundsDidChange(_ clip: NSClipView) {
             let origin = clip.bounds.origin.y
@@ -516,19 +645,36 @@ struct SyncedTextView: NSViewRepresentable {
             defer { record(clip) }
             // 縦の位置が変わっていない（横方向・大きさだけの変化）
             guard origin != lastOrigin else { return }
-            // こちらで動かした（連動・文字列の置き換え・文字サイズ変更）
-            guard programmaticDepth == 0, !parent.controller.isSyncing else { return }
+            // こちらで動かした（連動・文字列の置き換え・文字サイズ変更）、またはこちらで設定した位置の通知
+            guard programmaticDepth == 0, !parent.controller.isSyncing,
+                  !parent.controller.isProgrammaticOffset(origin, on: parent.side) else { return }
             // ウィンドウの大きさが変わったことによる位置の補正
             guard size == lastClipSize else { return }
-            // 文字列が短くなって末尾に合わせ直された（ユーザー操作ではない）。
-            // 逆に、長い文書でスクロール中にレイアウトが進んで高さが伸びるのは普通なので、その場合は連動させる
+            // 文字列が短くなって末尾に合わせ直された（ユーザー操作ではない）
             guard documentHeight >= lastDocumentHeight else { return }
+            guard isLiveScrolling || isUserInput(in: clip) else { return }
             parent.controller.didScroll(parent.side)
+        }
+
+        /// いま処理中のイベントが、このテキストビューへのキー入力・マウス操作か
+        @MainActor
+        private func isUserInput(in clip: NSClipView) -> Bool {
+            guard let event = NSApp.currentEvent,
+                  ProcessInfo.processInfo.systemUptime - event.timestamp < Self.userEventWindow else { return false }
+            switch event.type {
+            case .keyDown, .leftMouseDown, .leftMouseDragged:
+                // キーボードでのスクロール・ドラッグでの選択は、このテキストビューが操作の対象のときだけ
+                guard let textView = clip.documentView else { return false }
+                return clip.window?.firstResponder === textView
+            default:
+                return false
+            }
         }
 
         func textDidChange(_ notification: Notification) {
             guard let v = notification.object as? NSTextView else { return }
-            MainActor.assumeIsolated { parent.controller.textDidChange(parent.side) }
+            // ユーザーの入力（プログラムからの書き換えでは通知されない）
+            MainActor.assumeIsolated { parent.controller.userDidEdit(parent.side) }
             // 変換中の未確定文字はモデルに渡さない（確定したときにもう一度呼ばれる）
             guard !v.hasMarkedText() else { return }
             parent.text = v.string
@@ -542,6 +688,7 @@ struct SyncedTextView: NSViewRepresentable {
 
 /// ホイール・トラックパッドのスクロールを（慣性スクロールも含めて）1 イベントずつ知らせる NSScrollView。
 /// 境界の変化通知だけでは、長い文書でレイアウトが進んで高さが変わる最中のスクロールを見分けられないため。
+/// 連動はキャッシュ済みの位置の対応と二分探索だけなので、イベントごとに呼んでも軽い。
 final class SyncScrollView: NSScrollView {
     var onUserScroll: (() -> Void)?
 
