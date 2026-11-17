@@ -57,6 +57,9 @@ struct TranslateView: View {
         .onChange(of: model.settings.targetLang) { _, _ in model.retranslateIfLive() }
         .onChange(of: model.settings.sourceLang) { _, _ in model.retranslateIfLive() }
         .onChange(of: model.settings.form) { _, _ in model.retranslateIfLive() }
+        // スクロール連動: 長文の段落対応と、翻訳中かどうか（翻訳中は原文を基準に合わせる）
+        .onChange(of: model.outputAlignment, initial: true) { _, alignment in scrollSync.setAlignment(alignment) }
+        .onChange(of: model.isTranslating, initial: true) { _, translating in scrollSync.setTranslating(translating) }
         .sheet(isPresented: $showGlossary) { GlossarySheet().environmentObject(model) }
         .fileExporter(isPresented: $showExporter,
                       document: TextDocument(text: model.outputText),
