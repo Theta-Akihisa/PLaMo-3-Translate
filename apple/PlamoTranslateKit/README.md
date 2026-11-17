@@ -22,7 +22,9 @@ PFML3.cleanOutput(_:) -> String
 PFML3.stopStrings
 LanguageCatalog.all / .targets / .name(for:)
 ModelCatalog.all / .defaultModel / .spec(id:)
-TextSegmenter.segments(_:) -> [Segment]      // .text / .separator（区切りを保持）
+TextSegmenter.segments(_:) -> [Segment]      // .text / .separator（区切りを保持。\n / \r\n / \r の改行を認識）
+DocumentAssembler                            // 段落ごとの訳文の組み立て＋原文との対応（SegmentAlignment）
+ParagraphTranslationCache                    // 段落単位の訳文キャッシュ（LRU。Translator が内部で使う）
 TextSegmenter.paragraphs(_:)
 TranslationSettings                          // Codable。makeRequest(text:history:)
 
@@ -37,7 +39,8 @@ try await translator.load(model: spec, quant: nil, contextLength: 8192)
 translator.unload()
 for try await delta in translator.translate(request, maxTokens: 2048) { ... }  // 差分ストリーム
 try await translator.translateOnce(request)                                    // 全文
-for try await p in translator.translateDocument(text: t, settings: s) { p.text }  // 段落ごと＋履歴つき
+for try await p in translator.translateDocument(text: t, settings: s) { p.text; p.alignment; p.reusedParagraphs }  // 段落ごと＋履歴＋キャッシュ
+translator.clearTranslationCache()           // 段落キャッシュを消去
 Translator.recommendedModels() / Translator.memoryWarning(for:)
 
 // 低レベル（ローカル API など）
@@ -64,6 +67,53 @@ try await engine.tokenCount(of: text)        // BOS を含むトークン数
 - `Translator.translate` は全差分を流したあと `TranslatorError.outputTruncated` を投げて終わります。`translateOnce` も同様です。
 - `translateDocument` は打ち切られた段落の途中までの訳を残して次の段落へ進み、`DocumentProgress.truncatedParagraphs` で件数を報告します
   （その段落は history に加えません）。
+
+### 段落の対応（`DocumentProgress.alignment`）
+
+`translateDocument` が流す各 `DocumentProgress` は、原文の段落とその要素の `text`（訳文）の対応を
+`alignment: [SegmentAlignment]` に持ちます（スクロール連動などに使う）。
+
+```swift
+public struct SegmentAlignment: Sendable, Equatable, Hashable {
+    public var sourceLocation: Int   // translateDocument(text:) に渡した文字列での位置
+    public var sourceLength: Int
+    public var targetLocation: Int   // その DocumentProgress.text での位置
+    public var targetLength: Int
+    public var isComplete: Bool      // 翻訳中の段落は false（targetLength は途中結果の長さで、伸びていく）
+}
+```
+
+- 位置・長さはすべて **UTF-16 コード単位**（`NSString` / `NSRange` と同じ。`String.count` ではない）。
+  `NSRange(location: a.targetLocation, length: a.targetLength)` をそのまま `p.text` に使えます。
+- 翻訳対象の段落（空白以外を含む `.text`）ごとに 1 要素、文書順で、原文側・訳文側とも重なりません。
+  区切り・空白のみの段落は翻訳せずそのまま出力され、要素も段落数にも含まれません。
+- 開始済みの段落をすべて含みます（完了済み＋翻訳中の最大 1 つ）。翻訳中の要素は途中経過の値ごとに `text` と一致します。
+- 出力が空・打ち切りの段落にも要素があります（空なら `targetLength == 0`）。訳文に空行が含まれていても対応はずれません。
+- 訳文側は `PFML3.cleanOutput` で整形した後の文字列（＝ `text` に入る文字列）で数えます。
+- `DocumentProgress(...)` の `alignment` 引数は省略可能（既定値 `[]`）です。
+
+組み立てと対応の計算は Core の `DocumentAssembler` が行います（`DocumentAssembler.assemble(source:outputs:partial:)` で一括計算も可能。Linux でもテスト可）。
+
+### 段落キャッシュ（`DocumentProgress.reusedParagraphs`）
+
+原文の途中を編集して再翻訳したとき、変わっていない段落をモデルに送らずに済むよう、`translateDocument` は
+段落単位の訳文を `Translator` 内のキャッシュ（Core の `ParagraphTranslationCache`）に保存して再利用します。
+
+- **キー**: 段落の原文（完全一致）＋ `settings.makeRequest` と同じ正規化をした翻訳先言語（`ja(easy)` → `ja-easy`）・
+  翻訳元言語（自動なら nil）・文体（翻訳先が `ja` のときのみ）・文脈・用語集（順序も区別）＋ **読み込み済み**モデルの ID と量子化。
+  `settings.modelID` / `quant` ではなく実際に読み込まれているモデルを使います。
+- **history はキーに含めません。** 前後の段落が変わっても、原文と設定が同じ段落は以前の訳文を再利用します（意図した動作）。
+  `maxTokens` / `contextLength` / `useHistory` / `historyLimit` もキーに含めません。
+- ヒットした段落はモデルを呼ばずに組み立て（対応 `alignment` もモデルで訳した段落と同じ形）、`reusedParagraphs` で件数を報告します
+  （`completedParagraphs` にも含む）。連続するヒット段落は、次にモデルを呼ぶ直前（または最後）の進捗値でまとめて流すので、
+  キャッシュ済みの先頭部分はすぐに表示されます。history には、ヒットした段落の訳文もこれまでどおり入ります。
+- 保存するのはモデルで訳し終えた段落の整形済み訳文のみです。打ち切り（`.length`）・空の出力・キャンセル・エラー、
+  生成中にモデルが入れ替わった段落は保存しません。単発の `translate` / `translateOnce` はキャッシュを使いません。
+- 上限は 4,000 件または原文＋訳文で約 4 MB（UTF-8）のどちらか先に達した方。超えたら最も長く使われていないものから捨てます（LRU）。
+- **消去**: `clearTranslationCache()`。別のモデル・量子化の読み込みが完了したときにも自動で空にします
+  （キーにモデル・量子化が入っているので正しさには影響せず、メモリを空けるためです）。`unload()` では消さないので、
+  同じモデルを読み直せば再利用できます。
+- キャッシュは `Translator` の MainActor 上にあり、ほかのスレッドからは触りません。
 
 ### history とコンテキスト長
 

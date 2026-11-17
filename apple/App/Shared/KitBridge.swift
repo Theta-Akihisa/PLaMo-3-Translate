@@ -19,6 +19,11 @@ import PlamoTranslateKit
 //  - LlamaEngine.completeEvents(prompt:maxTokens:stop:) → CompletionEvent（.text / .finished(FinishReason)）
 //  - TranslatorError.outputTruncated（translate が全文を流した後、上限で切れていたら投げる）
 //  - DocumentProgress.truncatedParagraphs
+//  - DocumentProgress.alignment: [SegmentAlignment]（段落ごとの原文・訳文の UTF-16 範囲。スクロール連動に使う）
+//  - DocumentProgress.reusedParagraphs（キャッシュの訳を使い回した段落の数）
+//  - Translator.translateDocument は変わっていない段落の訳をキャッシュから即座に返し、変わった段落だけモデルに渡す
+//  - Translator.clearTranslationCache()（段落の訳のキャッシュを消す）
+//  - ParagraphTranslationCache.key(for: TranslationRequest, modelID:quant:)（短文の訳の覚え書きも同じキーにする）
 //  - Translator.load は新しい load に置き換えられると CancellationError を投げる
 // ============================================================
 
@@ -56,6 +61,9 @@ struct TranslationOutput: Equatable, Sendable {
     var sourceLang: String?
     /// 実際に使った訳文言語
     var targetLang: String = ""
+    /// 段落ごとの原文・訳文の対応（長文のみ）。訳文側は `text`（前後の空白を除いた訳文）を、
+    /// 原文側は翻訳した文字列（performTranslation に渡した `text`）を指す
+    var alignment: [SegmentAlignment] = []
 
     var isTruncated: Bool { truncatedParagraphs > 0 }
 
@@ -64,6 +72,16 @@ struct TranslationOutput: Equatable, Sendable {
         guard isTruncated else { return nil }
         return isDocument ? TruncationWarning.document(paragraphs: truncatedParagraphs) : TruncationWarning.single
     }
+}
+
+/// 翻訳の途中経過
+struct TranslationProgress {
+    /// 現時点の訳文（累積）
+    var text: String
+    /// 長文（段落ごとに翻訳）のときの段落対応。訳文側は `text`、原文側は翻訳した文字列を指す。短文では nil
+    var alignment: [SegmentAlignment]?
+    /// 段落ごとの翻訳で、キャッシュの訳を使い回した段落の数（短文では 0）
+    var reusedParagraphs: Int = 0
 }
 
 /// 外部（URL スキーム・クイック翻訳パネル）から渡されたテキストで置き換える前の原文
@@ -77,8 +95,9 @@ struct ReplacedSource: Equatable {
 final class AppModel: ObservableObject {
     static let shared = AppModel()
 
-    /// この文字数を超える入力は translateDocument（段落分割）で翻訳する
-    static let longTextThreshold = 1500
+    /// この文字数を超える入力は translateDocument（段落分割）で翻訳する。
+    /// 翻訳画面では、これより短くても段落が 2 つ以上あれば段落ごとに翻訳する（`TranslationRouting`）
+    static let longTextThreshold = TranslationRouting.longTextThreshold
     static let historyCapacity = 100
     /// 入力しながらの翻訳結果は、この時間そのままなら履歴に記録する（途中経過で履歴を埋めないため）
     static let historySettleNanos: UInt64 = 4_000_000_000
@@ -107,6 +126,18 @@ final class AppModel: ObservableObject {
         didSet { sourceChanged(old: oldValue) }
     }
     @Published var outputText = ""
+    /// 表示中の訳文は編集前の原文のもの（新しい訳の最初の途中経過が届くまで、前の訳を表示しておく）
+    @Published private(set) var isOutputStale = false
+    /// 直前に終わった段落ごとの翻訳の結果（原文・訳・段落対応）。文章の途中を編集したとき、
+    /// 編集した段落の訳が流れている間に後ろの段落の前回の訳を仮に並べるのに使う（`TailSplice`）
+    private var lastDocumentResult: OutputAlignment?
+    /// 入力しながらの翻訳を待っている（デバウンス中）
+    @Published private(set) var isLiveUpdatePending = false
+    /// 進行中の翻訳で、キャッシュの訳を使い回した段落の数（「変更された段落だけ翻訳中」の表示用）
+    @Published private(set) var reusedParagraphs = 0
+    /// 表示中の訳文と原文の段落対応（長文の翻訳のみ。スクロール連動に使う）。
+    /// 短文の翻訳・訳文のリセット・原文の編集では nil
+    @Published private(set) var outputAlignment: OutputAlignment?
     @Published var isTranslating = false
     @Published var errorMessage: String?
     /// 訳文が長さの上限で途中で切れたなどの警告（訳文は表示したまま）
@@ -156,6 +187,25 @@ final class AppModel: ObservableObject {
 
     private var sinks = Set<AnyCancellable>()
     private var translateTask: Task<Void, Never>?
+    /// 翻訳画面の短文（1 段落）の直近の訳（Kit の段落キャッシュと同じキー。履歴は含めない）。
+    /// 元に戻す（undo）などで同じ原文に戻ったら、モデルを使わずにすぐ出す
+    private var singleMemo = TranslationMemo<TranslationMemoKey, String>(capacity: 8)
+    /// 翻訳画面の「言語を検出」で使う原文言語（自信の無い検出では前の言語を使い続ける）。原文のクリア・置き換えで忘れる
+    private var stickySourceLang = StickySourceLanguage()
+    /// 長文の訳文の途中経過を画面に反映する間隔の下限（最大 12 回/秒。トークンごとに訳文ペインを書き換えない）
+    static let documentOutputInterval: TimeInterval = 1.0 / 12
+    /// まだ反映していない長文の途中経過
+    private var pendingOutput: PendingOutput?
+    private var outputFlushTask: Task<Void, Never>?
+    private var lastOutputPublish = Date.distantPast
+
+    private struct PendingOutput {
+        var text: String
+        var segments: [SegmentAlignment]
+        /// 原文ペインの文字列（翻訳を始めたとき）と、翻訳した文字列がその中で始まる位置（先頭の空白の長さ）
+        var source: String
+        var sourceShift: Int
+    }
     /// 進行中のモデル読み込み（UI・クイック翻訳・API で共有する）
     private var loadTask: Task<Void, Error>?
     /// loadTask が読み込んでいるモデルのキー
@@ -417,49 +467,77 @@ final class AppModel: ObservableObject {
 
     /// 翻訳の中核。onPartial には累積テキストが渡される。UI・メニューバー・ショートカット・サービスで共用。
     /// 訳文が長さの上限で切れた場合も、途中までの訳文を返す（`TranslationOutput.isTruncated`）。
+    /// `onProgress` には段落対応も渡される（翻訳画面のスクロール連動用）。
+    /// - Parameter incremental: 翻訳画面の翻訳。段落が 2 つ以上あれば短くても段落ごとに翻訳し
+    ///   （Kit が変わっていない段落の訳を使い回す）、1 段落の訳は直近の数件を覚えておいて同じ原文ならすぐ返す。
+    ///   「言語を検出」のときは、自信の無い検出では前に検出した原文言語を使い続ける（キャッシュのキーを揺らさない）。
+    ///   クイック翻訳・ショートカット・サービスでは使わない（これまでどおり）。
     func performTranslation(text: String,
                             targetLang: String? = nil,
                             useHistory: Bool = false,
-                            onPartial: @escaping (String) -> Void = { _ in }) async throws -> TranslationOutput {
+                            incremental: Bool = false,
+                            onPartial: @escaping (String) -> Void = { _ in },
+                            onProgress: ((TranslationProgress) -> Void)? = nil) async throws -> TranslationOutput {
         var s = settings
         let autoDetected = s.sourceLang == nil
-        if autoDetected { s.sourceLang = LanguageDetector.detect(text) }
+        if autoDetected {
+            let detected = LanguageDetector.detect(text)
+            // 翻訳画面では、編集中に検出結果が揺れても原文言語を変えない（Kit の段落キャッシュに当たり続けるように）
+            s.sourceLang = incremental ? stickySourceLang.resolve(detected) : detected
+        }
         if let t = targetLang {
             s.targetLang = t
         } else if autoDetected, let src = s.sourceLang, src == (PFML3.normalizeLang(s.targetLang) == "ja-easy" ? "ja" : s.targetLang) {
             s.targetLang = (src == "ja") ? "en" : "ja"   // DeepL 風: 同一言語なら ja⇄en
         }
         if s.targetLang != "ja" { s.form = nil }
+        let isDocument = TranslationRouting.usesParagraphs(text, incremental: incremental)
+        // 短文の 1 回の翻訳で使うリクエスト（few-shot の履歴は後で付ける）
+        var req = TranslationRequest(text: text,
+                                     targetLang: s.targetLang,
+                                     sourceLang: s.sourceLang,
+                                     form: s.targetLang == "ja" ? s.form : nil,
+                                     context: s.context.isEmpty ? nil : s.context,
+                                     glossary: s.glossary)
+        if incremental, !isDocument,
+           let memo = singleMemo.value(for: ParagraphTranslationCache.key(for: req, modelID: currentSpec.id,
+                                                                          quant: currentFile.quant)) {
+            // 同じ原文・設定・モデルの訳を覚えている（元に戻したときなど）: モデルを使わずにすぐ返す
+            try Task.checkCancellation()
+            onPartial(memo)
+            onProgress?(TranslationProgress(text: memo, alignment: nil))
+            return TranslationOutput(text: memo, truncatedParagraphs: 0, isDocument: false,
+                                     sourceLang: s.sourceLang, targetLang: s.targetLang)
+        }
         try await ensureLoaded()
         try Task.checkCancellation()
+        // 覚えておくときのキー（読み込んだモデル・量子化）
+        let memoKey = ParagraphTranslationCache.key(for: req, modelID: currentSpec.id, quant: currentFile.quant)
         var acc = ""
         var truncated = 0
-        let isDocument = text.count > Self.longTextThreshold
+        var alignment: [SegmentAlignment] = []
         if isDocument {
             do {
+                // 変わっていない段落の訳は Kit のキャッシュから即座に返る（最初の途中経過に入っている）
                 for try await p in translator.translateDocument(text: text, settings: s) {
                     acc = p.text
+                    alignment = p.alignment
                     truncated = p.truncatedParagraphs
                     onPartial(acc)
+                    onProgress?(TranslationProgress(text: acc, alignment: alignment, reusedParagraphs: p.reusedParagraphs))
                 }
             } catch TranslatorError.outputTruncated {
                 truncated = max(truncated, 1)
             }
         } else {
-            let pairs = (useHistory && s.useHistory)
+            req.history = (useHistory && s.useHistory)
                 ? recentHistoryPairs(text: text, sourceLang: s.sourceLang, target: s.targetLang, limit: s.historyLimit)
                 : []
-            let req = TranslationRequest(text: text,
-                                         targetLang: s.targetLang,
-                                         sourceLang: s.sourceLang,
-                                         form: s.targetLang == "ja" ? s.form : nil,
-                                         context: s.context.isEmpty ? nil : s.context,
-                                         glossary: s.glossary,
-                                         history: pairs)
             do {
                 for try await delta in translator.translate(req, maxTokens: s.maxTokens) {
                     acc += delta
                     onPartial(acc)
+                    onProgress?(TranslationProgress(text: acc, alignment: nil))
                 }
             } catch TranslatorError.outputTruncated {
                 // 全文を流し終えた後に投げられる。途中までの訳文は acc に入っている
@@ -467,9 +545,26 @@ final class AppModel: ObservableObject {
             }
         }
         if Task.isCancelled { throw CancellationError() }
-        return TranslationOutput(text: acc.trimmingCharacters(in: .whitespacesAndNewlines),
+        let trimmed = acc.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 最後まで訳せた短文の訳は覚えておく（途中で切れた訳・空の訳は覚えない）
+        if incremental, !isDocument, truncated == 0, !trimmed.isEmpty {
+            singleMemo.insert(trimmed, for: memoKey)
+        }
+        // 前後の空白を除いた分だけ訳文側の位置をずらす（表示する文字列を指すように）
+        let finalAlignment = isDocument
+            ? AlignmentAdjust.shifted(alignment, source: 0, target: -AlignmentAdjust.leadingWhitespaceLength(acc),
+                                      targetLength: (trimmed as NSString).length)
+            : []
+        return TranslationOutput(text: trimmed,
                                  truncatedParagraphs: truncated, isDocument: isDocument,
-                                 sourceLang: s.sourceLang, targetLang: s.targetLang)
+                                 sourceLang: s.sourceLang, targetLang: s.targetLang,
+                                 alignment: finalAlignment)
+    }
+
+    /// 段落の訳のキャッシュ（Kit）と、短文の訳の覚え書きを消す（設定画面）。次の翻訳ではすべて訳し直す
+    func clearTranslationCache() {
+        translator.clearTranslationCache()
+        singleMemo.removeAll()
     }
 
     // MARK: ライブ翻訳
@@ -477,8 +572,14 @@ final class AppModel: ObservableObject {
     private func sourceChanged(old: String) {
         if !assigningFileText { loadedFileSummary = nil }
         guard sourceText != old else { return }
+        // 表示中の訳文の段落対応は、もう原文と合わない
+        outputAlignment = nil
+        // 表示中の訳文は編集前の原文のもの。新しい訳の最初の途中経過が届くまでは（控えめに）表示しておく
+        if !outputText.isEmpty, !isOutputStale { isOutputStale = true }
         if !replacingSource { replacedSource = nil }   // 自分で編集したら「元に戻す」の案内は消す
         let isEmpty = sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // 別の文章になった（クリア・置き換え）: 前の文章で検出した原文言語は使わない
+        if replacingSource || isEmpty { stickySourceLang.reset() }
         // 原文の置き換え・クリアなら直前の訳を履歴に記録し、入力途中の編集なら途中経過として捨てる
         if replacingSource || isEmpty {
             commitPendingHistory()
@@ -487,9 +588,12 @@ final class AppModel: ObservableObject {
         }
         guard !suppressLive else { return }
         debounceTask?.cancel()
-        stopTranslation()   // 編集されたら進行中の生成を中断
+        isLiveUpdatePending = false
+        stopTranslation()   // 編集されたら進行中の生成を中断（訳文は消さない）
         if isEmpty {
             outputText = ""
+            lastDocumentResult = nil
+            isOutputStale = false
             errorMessage = nil
             warningMessage = nil
             detectedLang = nil
@@ -504,7 +608,8 @@ final class AppModel: ObservableObject {
     /// 検出言語の更新と、DeepL 風のスマート既定ターゲット（ja⇄en）
     private func updateDetection() {
         guard settings.sourceLang == nil else { detectedLang = nil; return }
-        let d = LanguageDetector.detect(sourceText)
+        // 翻訳に使う原文言語と同じく、自信の無い検出では前の言語を表示し続ける
+        let d = stickySourceLang.resolve(LanguageDetector.detect(sourceText))
         detectedLang = d
         guard let d else { return }
         let target = PFML3.normalizeLang(settings.targetLang) == "ja-easy" ? "ja" : settings.targetLang
@@ -522,6 +627,7 @@ final class AppModel: ObservableObject {
 
     private func scheduleTranslation(immediate: Bool) {
         debounceTask?.cancel()
+        isLiveUpdatePending = true
         debounceTask = Task { [weak self] in
             if !immediate { try? await Task.sleep(nanoseconds: Self.liveDebounceNanos) }
             guard !Task.isCancelled, let self else { return }
@@ -559,7 +665,7 @@ final class AppModel: ObservableObject {
     /// 入力済みの原文を置き換えた場合は、案内を出して元に戻せるようにする（`replacedSource`）。
     func translate(externalText: String, from origin: String) {
         if externalText == sourceText {
-            if !liveTranslate || (outputText.isEmpty && !isTranslating) { startTranslation() }
+            if !liveTranslate || ((outputText.isEmpty || isOutputStale) && !isTranslating) { startTranslation() }
             return
         }
         replaceSource(with: externalText, origin: origin)
@@ -580,25 +686,74 @@ final class AppModel: ObservableObject {
 
     /// - Parameter explicit: 「翻訳」ボタン・⌘↩ など明示的な実行。結果をすぐ履歴に記録する
     ///   （入力しながらの自動翻訳は、結果がしばらくそのままのときだけ記録する）。
+    ///
+    /// 訳文ペインは空にしない。新しい訳の最初の途中経過が届くまで前の訳を「更新中」として表示しておき、
+    /// 届いたらその場で書き換える。段落ごとの翻訳では変わっていない段落の訳が最初の途中経過にすぐ入る
+    /// （Kit のキャッシュ）ので、編集した段落より前は同じ文字列のまま、末尾だけが書き換わる（スクロール位置もそのまま）。
     func startTranslation(explicit: Bool = true) {
-        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = sourceText
+        let text = display.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        // Kit の段落対応の原文側は前後の空白を除いた text を指す。原文ペインの文字列を指すようにずらす
+        let sourceShift = AlignmentAdjust.leadingWhitespaceLength(display)
         translateTask?.cancel()
         runID += 1
         let id = runID
+        isLiveUpdatePending = false
         isTranslating = true
         errorMessage = nil
         warningMessage = nil
-        outputText = ""
+        cancelPendingOutput()
+        if reusedParagraphs != 0 { reusedParagraphs = 0 }
+        if !outputText.isEmpty, !isOutputStale { isOutputStale = true }
         let source = settings.sourceLang
+        // 前の訳を表示しているなら、その段落ごとの訳を後ろの段落の仮表示に使う
+        let spliceBase = isOutputStale ? lastDocumentResult : nil
         translateTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let output = try await self.performTranslation(text: text, useHistory: true) { [weak self] partial in
-                    if let self, self.runID == id { self.outputText = partial }
-                }
+                let output = try await self.performTranslation(text: text, useHistory: true, incremental: true,
+                                                               onProgress: { [weak self] p in
+                    guard let self, self.runID == id else { return }
+                    if self.reusedParagraphs != p.reusedParagraphs { self.reusedParagraphs = p.reusedParagraphs }
+                    // 編集した段落の訳が流れている間も、後ろの変わっていない段落は前回の訳を並べておく（消えない）
+                    var shownText = p.text
+                    var shownSegments = p.alignment
+                    if let segments = p.alignment {
+                        let spliced = TailSplice.splice(progressText: p.text, progressSegments: segments,
+                                                        source: text, previous: spliceBase)
+                        shownText = spliced.text
+                        shownSegments = spliced.segments
+                    }
+                    // 前の訳を表示している間は、それより情報の少ない途中経過（空・前の訳の先頭部分のまま）では書き換えない
+                    guard LiveOutputPolicy.acceptsProgress(shownText, previous: self.isOutputStale ? self.outputText : nil)
+                    else { return }
+                    if let segments = shownSegments {
+                        let pending = PendingOutput(text: shownText, segments: segments, source: display, sourceShift: sourceShift)
+                        if self.isOutputStale {
+                            // 前の訳から新しい訳へは待たずに書き換える（変わっていない段落はそのまま、末尾だけが変わる）
+                            self.cancelPendingOutput()
+                            self.pendingOutput = pending
+                            self.flushPendingOutput()
+                        } else {
+                            // 段落ごとの翻訳: 訳文ペインの書き換えをまとめる（段落対応も一緒に反映する）
+                            self.enqueueOutput(pending)
+                        }
+                    } else {
+                        if self.isOutputStale { self.isOutputStale = false }
+                        if self.outputAlignment != nil { self.outputAlignment = nil }
+                        self.outputText = p.text
+                    }
+                })
                 if self.runID == id {
+                    self.cancelPendingOutput()
+                    self.isOutputStale = false
                     self.outputText = output.text
+                    self.outputAlignment = output.isDocument
+                        ? Self.makeAlignment(source: display, sourceShift: sourceShift,
+                                             target: output.text, segments: output.alignment)
+                        : nil
+                    self.lastDocumentResult = self.outputAlignment
                     // 長さの上限で切れた訳は表示したまま警告し、履歴（＝次の翻訳の文脈）には残さない
                     self.warningMessage = output.warning
                     if !output.isTruncated {
@@ -609,18 +764,70 @@ final class AppModel: ObservableObject {
                     }
                 }
             } catch is CancellationError {
-                // 中断: 部分結果は残す
+                // 中断: 部分結果（または前の訳）は残す
             } catch {
-                if self.runID == id, !Task.isCancelled { self.errorMessage = error.localizedDescription }
+                if self.runID == id, !Task.isCancelled {
+                    self.flushPendingOutput()   // 途中までの訳文は表示する
+                    if self.isOutputStale {
+                        // 新しい訳がまだ何も無い: 前の原文の訳はエラーと一緒に出さない
+                        self.isOutputStale = false
+                        self.outputText = ""
+                        self.outputAlignment = nil
+                        self.lastDocumentResult = nil
+                    }
+                    self.errorMessage = error.localizedDescription
+                }
             }
-            if self.runID == id { self.isTranslating = false }
+            if self.runID == id {
+                self.isTranslating = false
+                if self.reusedParagraphs != 0 { self.reusedParagraphs = 0 }
+            }
         }
     }
 
     func stopTranslation() {
         runID += 1
         translateTask?.cancel()
+        cancelPendingOutput()
         isTranslating = false
+    }
+
+    // MARK: 長文の途中経過の反映（最大 12 回/秒）
+
+    private static func makeAlignment(source: String, sourceShift: Int, target: String,
+                                      segments: [SegmentAlignment]) -> OutputAlignment {
+        OutputAlignment(source: source, target: target,
+                        segments: AlignmentAdjust.shifted(segments, source: sourceShift, target: 0,
+                                                          targetLength: (target as NSString).length))
+    }
+
+    private func enqueueOutput(_ output: PendingOutput) {
+        pendingOutput = output
+        guard outputFlushTask == nil else { return }
+        let wait = Self.documentOutputInterval - Date().timeIntervalSince(lastOutputPublish)
+        guard wait > 0 else { flushPendingOutput(); return }
+        outputFlushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.outputFlushTask = nil
+            self.flushPendingOutput()
+        }
+    }
+
+    private func flushPendingOutput() {
+        guard let p = pendingOutput else { return }
+        pendingOutput = nil
+        lastOutputPublish = Date()
+        if isOutputStale { isOutputStale = false }
+        outputText = p.text
+        outputAlignment = Self.makeAlignment(source: p.source, sourceShift: p.sourceShift,
+                                             target: p.text, segments: p.segments)
+    }
+
+    private func cancelPendingOutput() {
+        outputFlushTask?.cancel()
+        outputFlushTask = nil
+        pendingOutput = nil
     }
 
     /// 文字列を取り出す（ドラッグ&ドロップ / ファイル読み込み用）
@@ -735,11 +942,14 @@ final class AppModel: ObservableObject {
 
     func restore(_ entry: HistoryEntry) {
         commitPendingHistory()
+        stickySourceLang.reset()
         suppressLive = true
         sourceText = entry.source
         suppressLive = false
         stopTranslation()
         outputText = entry.translation
+        isOutputStale = false
+        outputAlignment = nil
         errorMessage = nil
         warningMessage = nil
         settings.sourceLang = entry.sourceLang

@@ -36,6 +36,14 @@ public final class Translator: ObservableObject {
     private var loadGeneration = 0
     /// 最後に開始した load / unload の処理。次の load / unload はこれの完了を待ってから始める（直列化）
     private var lifecycle: Task<Void, Never>?
+    /// 読み込み済みモデルの量子化（段落キャッシュのキーに使う）
+    private var loadedQuant: String?
+    /// `translateDocument` の段落単位の訳文キャッシュ。キーにモデル ID・量子化を含む。
+    /// 別のモデル・量子化の読み込みが完了したら空にする（`unload` では消さない: 同じモデルを読み直せば再利用できる）
+    private var paragraphCache = ParagraphTranslationCache()
+    /// `paragraphCache` の中身を作ったモデル
+    private var paragraphCacheModelID: String?
+    private var paragraphCacheQuant: String?
 
     public init(store: ModelStore) { self.store = store }
     public convenience init() { self.init(store: ModelStore()) }
@@ -60,9 +68,11 @@ public final class Translator: ObservableObject {
         let previous = lifecycle
         let url = store.localURL(for: file)
         let modelID = model.id
+        let resolvedQuant = file.quant
         let work: Task<Void, Error> = Task { @MainActor in
             _ = await previous?.value
-            try await self.performLoad(generation: generation, modelID: modelID, url: url, contextLength: contextLength)
+            try await self.performLoad(generation: generation, modelID: modelID, quant: resolvedQuant,
+                                       url: url, contextLength: contextLength)
         }
         lifecycle = Task { _ = await work.result }
         try await withTaskCancellationHandler {
@@ -76,13 +86,14 @@ public final class Translator: ObservableObject {
         generation == loadGeneration && !Task.isCancelled
     }
 
-    private func performLoad(generation: Int, modelID: String, url: URL, contextLength: Int) async throws {
+    private func performLoad(generation: Int, modelID: String, quant: String, url: URL, contextLength: Int) async throws {
         do {
             guard isCurrentLoad(generation) else { throw CancellationError() }
             // 旧エンジンの生成を止め、停止を待ってから解放する
             if let old = engine {
                 engine = nil
                 loadedModelID = nil
+                loadedQuant = nil
                 await old.shutdown()
             }
             guard isCurrentLoad(generation) else { throw CancellationError() }
@@ -96,6 +107,13 @@ public final class Translator: ObservableObject {
             }
             engine = e
             loadedModelID = modelID
+            loadedQuant = quant
+            // 別のモデル・量子化の訳文は二度とヒットしないので捨てる（キーにも含まれるので正しさには影響しない）
+            if paragraphCacheModelID != modelID || paragraphCacheQuant != quant {
+                paragraphCache.removeAll()
+                paragraphCacheModelID = modelID
+                paragraphCacheQuant = quant
+            }
             state = .ready(modelID: modelID)
         } catch {
             // 追い越された場合、state は新しい load / unload が管理する
@@ -118,6 +136,7 @@ public final class Translator: ObservableObject {
         let old = engine
         engine = nil
         loadedModelID = nil
+        loadedQuant = nil
         state = .noModel
         let previous = lifecycle
         lifecycle = Task {
@@ -195,52 +214,87 @@ public final class Translator: ObservableObject {
     /// 各要素は「現時点で組み立て済みの全訳文」（区切りは原文のまま保持）。
     /// 出力が上限で切れた段落は途中までの訳を残して次の段落へ進み、`truncatedParagraphs` で報告する
     /// （その段落は history に加えない）。
+    /// 各要素の `alignment` は、`text`（原文）とその要素の `text`（訳文）の段落対応（UTF-16 単位）。
+    /// 空白のみの段落は翻訳せずそのまま出力し、段落数・対応には含めない。
+    ///
+    /// 段落キャッシュ: 原文・設定（言語・文体・文脈・用語集）・読み込み済みモデル／量子化が同じ段落を
+    /// 以前に翻訳していれば、モデルを呼ばずにその訳文を使い、`reusedParagraphs` で件数を報告する
+    /// （history はキーに含めないので、前後の段落が変わっても再利用する）。
+    /// 連続するキャッシュ済み段落は、次にモデルを呼ぶ前（または最後）にまとめて流す。
+    /// モデルで翻訳した段落は、打ち切り・空・キャンセル・エラーでなければキャッシュに保存する。
+    /// `clearTranslationCache()` で消去できる。
     public func translateDocument(text: String, settings: TranslationSettings) -> AsyncThrowingStream<DocumentProgress, Error> {
-        let segments = TextSegmenter.segments(text)
-        let total = segments.filter { $0.isText }.count
+        let assembler = DocumentAssembler(source: text)
+        let total = assembler.totalParagraphs
         return AsyncThrowingStream { continuation in
             let task = Task { @MainActor [weak self] in
                 guard let self else { continuation.finish(); return }
-                var assembled = ""
+                var doc = assembler
                 var done = 0
                 var truncatedCount = 0
+                var reusedCount = 0
+                /// キャッシュから完了させた段落をまだ流していない
+                var hasUnsentReused = false
                 var history: [HistoryPair] = []
-                func progress(_ text: String, finished: Bool = false) -> DocumentProgress {
-                    DocumentProgress(text: text, totalParagraphs: total, completedParagraphs: done,
-                                     isFinished: finished, truncatedParagraphs: truncatedCount)
+                func progress(_ snapshot: DocumentAssembler.Snapshot, finished: Bool = false) -> DocumentProgress {
+                    DocumentProgress(text: snapshot.text, totalParagraphs: total, completedParagraphs: done,
+                                     isFinished: finished, truncatedParagraphs: truncatedCount,
+                                     alignment: snapshot.alignment, reusedParagraphs: reusedCount)
                 }
                 do {
-                    for seg in segments {
+                    while let src = doc.beginNextParagraph() {
                         try Task.checkCancellation()
-                        switch seg {
-                        case .separator(let s):
-                            assembled += s
-                        case .text(let src):
-                            let hist = settings.useHistory && settings.historyLimit > 0
-                                ? Array(history.suffix(settings.historyLimit)) : []
-                            let req = settings.makeRequest(text: src, history: hist)
-                            var part = ""
-                            var truncated = false
-                            do {
-                                for try await d in self.translate(req, maxTokens: settings.maxTokens) {
-                                    part += d
-                                    continuation.yield(progress(assembled + part))
-                                }
-                            } catch TranslatorError.outputTruncated {
-                                truncated = true
-                            }
-                            let cleaned = PFML3.cleanOutput(part)
-                            assembled += cleaned
-                            done += 1
-                            if truncated {
-                                truncatedCount += 1
-                            } else if !cleaned.isEmpty {
-                                history.append(HistoryPair(source: src, translation: cleaned))
-                            }
-                            continuation.yield(progress(assembled))
+                        let hist = settings.useHistory && settings.historyLimit > 0
+                            ? Array(history.suffix(settings.historyLimit)) : []
+                        let req = settings.makeRequest(text: src, history: hist)
+                        // キーは実際に使うエンジンのモデルで作る（未読み込みならキャッシュを使わず translate がエラーにする）
+                        let usedEngine = self.engine
+                        var cacheKey: ParagraphTranslationCache.Key?
+                        if usedEngine != nil, let modelID = self.loadedModelID, let quant = self.loadedQuant {
+                            cacheKey = ParagraphTranslationCache.key(for: req, modelID: modelID, quant: quant)
                         }
+                        if let cacheKey, let cached = self.paragraphCache.lookup(cacheKey) {
+                            // fresh な段落と同じく complete で組み立てる（対応も同じ形になる）
+                            doc.complete(output: cached)
+                            done += 1
+                            reusedCount += 1
+                            history.append(HistoryPair(source: src, translation: cached))
+                            hasUnsentReused = true
+                            continue
+                        }
+                        if hasUnsentReused {
+                            // ここまでのキャッシュ済み段落を、モデルの最初の出力を待たずに表示させる
+                            continuation.yield(progress(doc.snapshot()))
+                            hasUnsentReused = false
+                        }
+                        var part = ""
+                        var truncated = false
+                        do {
+                            for try await d in self.translate(req, maxTokens: settings.maxTokens) {
+                                part += d
+                                continuation.yield(progress(doc.snapshot(partial: part)))
+                            }
+                        } catch TranslatorError.outputTruncated {
+                            truncated = true
+                        }
+                        // 対応の訳文側は整形後の文字列で数える（text に入るのはこの文字列）
+                        let cleaned = PFML3.cleanOutput(part)
+                        doc.complete(output: cleaned)
+                        done += 1
+                        if truncated {
+                            truncatedCount += 1
+                        } else if !cleaned.isEmpty {
+                            history.append(HistoryPair(source: src, translation: cleaned))
+                            // 購読終了でストリームが途中で終わった場合（キャンセル）や、生成中にモデルが
+                            // 入れ替わった場合は保存しない
+                            if let cacheKey, !Task.isCancelled, self.engine === usedEngine {
+                                self.paragraphCache.store(cleaned, for: cacheKey)
+                            }
+                        }
+                        continuation.yield(progress(doc.snapshot()))
                     }
-                    continuation.yield(progress(assembled, finished: true))
+                    // beginNextParagraph が nil を返した時点で末尾の区切りまで text に入っている
+                    continuation.yield(progress(doc.snapshot(), finished: true))
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
@@ -250,6 +304,13 @@ public final class Translator: ObservableObject {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    // MARK: - Paragraph cache
+
+    /// `translateDocument` の段落キャッシュをすべて削除する。
+    public func clearTranslationCache() {
+        paragraphCache.removeAll()
     }
 
     // MARK: - Device RAM

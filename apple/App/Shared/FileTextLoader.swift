@@ -69,13 +69,13 @@ enum FileTextLoader {
             case "rtf":
                 let attr = try NSAttributedString(url: url, options: [.documentType: NSAttributedString.DocumentType.rtf],
                                                   documentAttributes: nil)
-                return try nonEmpty(Result(text: attr.string, fileName: name))
+                return try nonEmpty(Result(text: normalizeLineEndings(attr.string), fileName: name))
             default:
                 guard textExtensions.contains(ext) || ext.isEmpty else { throw LoadError.unsupported(ext) }
                 let data = try Data(contentsOf: url)
                 guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .shiftJIS)
                         ?? String(data: data, encoding: .japaneseEUC) else { throw LoadError.unreadable }
-                return try nonEmpty(Result(text: text, fileName: name))
+                return try nonEmpty(Result(text: normalizeLineEndings(text), fileName: name))
             }
         }
         // Task.detached は呼び出し元のキャンセルを引き継がないので、明示的に伝える
@@ -84,6 +84,15 @@ enum FileTextLoader {
         } onCancel: {
             work.cancel()
         }
+    }
+
+    /// 改行を \n にそろえる（Windows の \r\n・古い Mac の \r・RTF の行区切り U+2028 / 段落区切り U+2029）。
+    /// 段落の区切り（空行）の判定・スクロール連動の段落の対応づけを、どの改行でも同じにするため
+    static func normalizeLineEndings(_ s: String) -> String {
+        s.replacingOccurrences(of: "\r\n", with: "\n", options: .literal)
+            .replacingOccurrences(of: "\r", with: "\n", options: .literal)
+            .replacingOccurrences(of: "\u{2028}", with: "\n", options: .literal)
+            .replacingOccurrences(of: "\u{2029}", with: "\n", options: .literal)
     }
 
     private static func nonEmpty(_ r: Result) throws -> Result {

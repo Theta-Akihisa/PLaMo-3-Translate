@@ -108,6 +108,27 @@ public struct TranslationSettings: Codable, Hashable, Sendable {
     }
 }
 
+/// One translated paragraph: where it is in the source text and in `DocumentProgress.text`.
+/// All locations/lengths are UTF-16 code-unit offsets (NSString / NSRange units).
+///
+/// 原文側は `translateDocument(text:settings:)` に渡した文字列そのもの、訳文側はその進捗値の `text` を指す。
+public struct SegmentAlignment: Sendable, Equatable, Hashable {
+    public var sourceLocation: Int
+    public var sourceLength: Int
+    public var targetLocation: Int
+    public var targetLength: Int
+    /// false for the paragraph currently being generated (its targetLength grows)
+    public var isComplete: Bool
+
+    public init(sourceLocation: Int, sourceLength: Int, targetLocation: Int, targetLength: Int, isComplete: Bool) {
+        self.sourceLocation = sourceLocation
+        self.sourceLength = sourceLength
+        self.targetLocation = targetLocation
+        self.targetLength = targetLength
+        self.isComplete = isComplete
+    }
+}
+
 /// 文書翻訳の進捗。`text` は完了済みの段落＋翻訳中の途中結果＋区切りを連結した、現時点の全訳文。
 public struct DocumentProgress: Sendable, Equatable {
     public var text: String
@@ -118,13 +139,23 @@ public struct DocumentProgress: Sendable, Equatable {
     public var isFinished: Bool
     /// 出力がトークン上限に達して途中で打ち切られた段落の数（その段落の途中までの訳は `text` に含まれる）
     public var truncatedParagraphs: Int
+    /// Correspondence between source paragraphs and the assembled output `text`, in order.
+    /// Covers every translatable segment that has started (completed ones + at most one in progress).
+    ///
+    /// 原文側・訳文側とも文書順で重ならない。出力が空・打ち切りの段落にも要素がある（空なら `targetLength == 0`）。
+    /// 翻訳中の段落は `isComplete == false` で、`targetLength` は `text` に含まれる途中結果の長さ。
+    public var alignment: [SegmentAlignment]
+    /// この実行で段落キャッシュから再利用した（モデルを呼ばなかった）段落の数。`completedParagraphs` に含まれる
+    public var reusedParagraphs: Int
     public init(text: String, totalParagraphs: Int, completedParagraphs: Int, isFinished: Bool,
-                truncatedParagraphs: Int = 0) {
+                truncatedParagraphs: Int = 0, alignment: [SegmentAlignment] = [], reusedParagraphs: Int = 0) {
         self.text = text
         self.totalParagraphs = totalParagraphs
         self.completedParagraphs = completedParagraphs
         self.isFinished = isFinished
         self.truncatedParagraphs = truncatedParagraphs
+        self.alignment = alignment
+        self.reusedParagraphs = reusedParagraphs
     }
     public var fraction: Double {
         totalParagraphs == 0 ? 1 : Double(completedParagraphs) / Double(totalParagraphs)

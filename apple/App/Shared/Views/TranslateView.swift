@@ -26,6 +26,8 @@ struct TranslateView: View {
     private var paneFontSize: CGFloat { baseFontSize * TextScale.clamp(textScale) }
     @State private var showGlossary = false
     @State private var showExporter = false
+    /// 「コントラストを上げる」では、編集前の訳を薄くしない（文字は読めるままにする）
+    @Environment(\.colorSchemeContrast) private var contrast
     #if os(iOS)
     @State private var showHistory = false
     #endif
@@ -57,6 +59,9 @@ struct TranslateView: View {
         .onChange(of: model.settings.targetLang) { _, _ in model.retranslateIfLive() }
         .onChange(of: model.settings.sourceLang) { _, _ in model.retranslateIfLive() }
         .onChange(of: model.settings.form) { _, _ in model.retranslateIfLive() }
+        // スクロール連動: 長文の段落対応と、翻訳中かどうか（翻訳中は原文を基準に合わせる）
+        .onChange(of: model.outputAlignment, initial: true) { _, alignment in scrollSync.setAlignment(alignment) }
+        .onChange(of: model.isTranslating, initial: true) { _, translating in scrollSync.setTranslating(translating) }
         .sheet(isPresented: $showGlossary) { GlossarySheet().environmentObject(model) }
         .fileExporter(isPresented: $showExporter,
                       document: TextDocument(text: model.outputText),
@@ -154,7 +159,10 @@ struct TranslateView: View {
                 .buttonStyle(.borderless)
                 .help("ファイルを開く（⌘O）— テキスト / PDF / RTF")
                 Spacer()
-                if !model.liveTranslate || model.isTranslating == false && model.outputText.isEmpty && !model.sourceText.isEmpty {
+                // 入力しながらの翻訳でも、訳が無いとき・編集前の訳のまま止まっているとき（中断・エラー）は出す
+                if !model.liveTranslate
+                    || (!model.isTranslating && !model.sourceText.isEmpty
+                        && (model.outputText.isEmpty || (model.isOutputStale && !model.isLiveUpdatePending))) {
                     Button("翻訳") { sourceFocused = false; model.startTranslation() }
                         .keyboardShortcut(.return, modifiers: .command)
                         .disabled(model.sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -298,6 +306,17 @@ struct TranslateView: View {
         .padding(.vertical, 8)
     }
 
+    /// 入力しながらの翻訳の状態（訳文ペインの下）
+    private var liveStatusText: String? {
+        if model.isOutputStale {
+            // 表示中の訳は編集前の原文のもの
+            return model.isTranslating || model.isLiveUpdatePending ? "更新中…" : "原文が変更されています"
+        }
+        // 変わっていない段落の訳は使い回し、変わった段落だけをモデルで翻訳している
+        if model.isTranslating, model.reusedParagraphs > 0 { return "変更された段落だけ翻訳中" }
+        return nil
+    }
+
     private var formLabel: String {
         switch model.settings.form {
         case .some(.plain): return "常体"
@@ -326,6 +345,8 @@ struct TranslateView: View {
             ZStack(alignment: .topLeading) {
                 SyncedTextView(text: Binding(get: { model.outputText }, set: { _ in }), isEditable: false,
                                fontSize: paneFontSize, side: .target, controller: scrollSync)
+                    // 原文を編集した後、新しい訳が届くまでは前の訳を薄く表示する（空にしない）
+                    .opacity(model.isOutputStale && contrast != .increased ? 0.6 : 1)
                 if model.outputText.isEmpty, model.errorMessage == nil {
                     Text("訳文がここに表示されます")
                         .translationTextFont()
@@ -339,6 +360,9 @@ struct TranslateView: View {
                 if model.isLoadingModel { ProgressView().controlSize(.mini) }
                 Text(model.statusText).font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                if let live = liveStatusText {
+                    Text(live).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
